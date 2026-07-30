@@ -6,6 +6,7 @@ import CoreGraphics
 final class MenuBarController: NSObject, NSPopoverDelegate {
     var onShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
+    var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
 
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
@@ -18,7 +19,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         self.contentController = SettingsViewController(
             modelID: modelID,
             shortcut: settings.shortcut,
-            activationMode: settings.activationMode
+            activationMode: settings.activationMode,
+            language: settings.transcriptionLanguage
         )
         super.init()
 
@@ -36,13 +38,16 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
                 self.contentController.setState(self.idleText)
             }
         }
+        contentController.onLanguageChanged = { [weak self] language in
+            self?.onLanguageChanged?(language)
+        }
         contentController.onQuit = {
             NSApp.terminate(nil)
         }
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 320, height: 280)
+        popover.contentSize = NSSize(width: 320, height: 322)
         popover.contentViewController = contentController
         popover.delegate = self
 
@@ -68,6 +73,25 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     func setUnavailable(_ message: String) {
+        contentController.setState(message)
+    }
+
+    func setLoading(_ language: TranscriptionLanguage) {
+        contentController.setLanguageEnabled(false)
+        contentController.setState("loading \(language.displayName.lowercased()) model…")
+    }
+
+    func setReady(modelID: String, language: TranscriptionLanguage) {
+        settings.transcriptionLanguage = language
+        contentController.setLanguageEnabled(true)
+        contentController.setLanguage(language)
+        contentController.setModel(modelID)
+        contentController.setState(idleText)
+    }
+
+    func setLanguageError(_ message: String) {
+        contentController.setLanguageEnabled(true)
+        contentController.setLanguage(settings.transcriptionLanguage)
         contentController.setState(message)
     }
 
@@ -113,9 +137,11 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 private final class SettingsViewController: NSViewController {
     var onShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
+    var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
     var onQuit: (() -> Void)?
 
     private let stateLabel = NSTextField(labelWithString: "")
+    private let modelLabel = NSTextField(labelWithString: "")
     private let shortcutButton = ShortcutRecorderButton()
     private let modeControl = NSSegmentedControl(
         labels: ActivationMode.allCases.map(\.displayName),
@@ -126,8 +152,14 @@ private final class SettingsViewController: NSViewController {
     private let launchAtLogin = LaunchAtLoginManager()
     private let loginCheckbox = NSButton()
     private let loginStatusLabel = NSTextField(labelWithString: "")
+    private let languagePopup = NSPopUpButton()
 
-    init(modelID: String, shortcut: HotkeyShortcut, activationMode: ActivationMode) {
+    init(
+        modelID: String,
+        shortcut: HotkeyShortcut,
+        activationMode: ActivationMode,
+        language: TranscriptionLanguage
+    ) {
         super.init(nibName: nil, bundle: nil)
 
         let title = NSTextField(labelWithString: "Parrot")
@@ -136,10 +168,10 @@ private final class SettingsViewController: NSViewController {
         stateLabel.font = .systemFont(ofSize: 12)
         stateLabel.textColor = .secondaryLabelColor
 
-        let modelLabel = NSTextField(labelWithString: "model: \(modelID)")
         modelLabel.font = .systemFont(ofSize: 11)
         modelLabel.textColor = .tertiaryLabelColor
         modelLabel.lineBreakMode = .byTruncatingMiddle
+        setModel(modelID)
 
         shortcutButton.shortcut = shortcut
         shortcutButton.toolTip = "Click, then press a shortcut. Modifier-only keys are supported."
@@ -153,6 +185,12 @@ private final class SettingsViewController: NSViewController {
 
         let shortcutRow = Self.row(label: "Hotkey", control: shortcutButton)
         let modeRow = Self.row(label: "Behavior", control: modeControl)
+
+        languagePopup.addItems(withTitles: TranscriptionLanguage.allCases.map(\.displayName))
+        languagePopup.selectItem(at: TranscriptionLanguage.allCases.firstIndex(of: language) ?? 0)
+        languagePopup.target = self
+        languagePopup.action = #selector(languageChanged)
+        let languageRow = Self.row(label: "Language", control: languagePopup)
 
         loginCheckbox.setButtonType(.switch)
         loginCheckbox.title = "Launch Parrot at login"
@@ -182,7 +220,8 @@ private final class SettingsViewController: NSViewController {
         quitButton.contentTintColor = .secondaryLabelColor
 
         let stack = NSStackView(views: [
-            title, stateLabel, modelLabel, shortcutRow, modeRow, loginRow, separator, quitButton,
+            title, stateLabel, modelLabel, shortcutRow, modeRow, languageRow, loginRow,
+            separator, quitButton,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -207,6 +246,7 @@ private final class SettingsViewController: NSViewController {
             stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -12),
             shortcutRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             modeRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            languageRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             loginRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             separator.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
@@ -218,6 +258,20 @@ private final class SettingsViewController: NSViewController {
 
     func setState(_ text: String) {
         stateLabel.stringValue = text
+    }
+
+    func setModel(_ modelID: String) {
+        modelLabel.stringValue = "model: \(modelID)"
+    }
+
+    func setLanguage(_ language: TranscriptionLanguage) {
+        languagePopup.selectItem(
+            at: TranscriptionLanguage.allCases.firstIndex(of: language) ?? 0
+        )
+    }
+
+    func setLanguageEnabled(_ enabled: Bool) {
+        languagePopup.isEnabled = enabled
     }
 
     private static func row(label: String, control: NSView) -> NSStackView {
@@ -239,6 +293,12 @@ private final class SettingsViewController: NSViewController {
         let modes = ActivationMode.allCases
         guard modes.indices.contains(modeControl.selectedSegment) else { return }
         onActivationModeChanged?(modes[modeControl.selectedSegment])
+    }
+
+    @objc private func languageChanged() {
+        let languages = TranscriptionLanguage.allCases
+        guard languages.indices.contains(languagePopup.indexOfSelectedItem) else { return }
+        onLanguageChanged?(languages[languagePopup.indexOfSelectedItem])
     }
 
     @objc private func loginSettingChanged() {

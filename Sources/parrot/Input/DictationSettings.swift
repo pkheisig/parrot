@@ -13,6 +13,28 @@ enum ActivationMode: String, CaseIterable {
     }
 }
 
+enum TranscriptionLanguage: String, CaseIterable, Codable {
+    case automatic
+    case english
+    case german
+
+    var displayName: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .english: "English"
+        case .german: "German"
+        }
+    }
+
+    var languageCode: String? {
+        switch self {
+        case .automatic: nil
+        case .english: "en"
+        case .german: "de"
+        }
+    }
+}
+
 struct HotkeyShortcut: Codable, Equatable {
     let keyCode: CGKeyCode
     let modifiersRawValue: UInt64
@@ -89,12 +111,19 @@ final class DictationSettings {
     private enum Key {
         static let shortcut = "dictationShortcut"
         static let activationMode = "activationMode"
+        static let transcriptionLanguage = "transcriptionLanguage"
     }
 
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = UserDefaults(suiteName: "com.digimata.parrot") ?? .standard) {
-        self.defaults = defaults
+    init(defaults: UserDefaults? = nil) {
+        if let defaults {
+            self.defaults = defaults
+        } else if Bundle.main.bundleIdentifier == "com.digimata.parrot" {
+            self.defaults = .standard
+        } else {
+            self.defaults = UserDefaults(suiteName: "com.digimata.parrot") ?? .standard
+        }
     }
 
     var shortcut: HotkeyShortcut {
@@ -119,6 +148,18 @@ final class DictationSettings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Key.activationMode)
+        }
+    }
+
+    var transcriptionLanguage: TranscriptionLanguage {
+        get {
+            guard let rawValue = defaults.string(forKey: Key.transcriptionLanguage),
+                  let language = TranscriptionLanguage(rawValue: rawValue)
+            else { return .automatic }
+            return language
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Key.transcriptionLanguage)
         }
     }
 }

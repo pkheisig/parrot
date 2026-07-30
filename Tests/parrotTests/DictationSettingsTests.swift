@@ -7,6 +7,7 @@ final class DictationSettingsTests: XCTestCase {
         withSettings { settings in
             XCTAssertEqual(settings.shortcut, .fn)
             XCTAssertEqual(settings.activationMode, .hold)
+            XCTAssertEqual(settings.transcriptionLanguage, .automatic)
         }
     }
 
@@ -22,11 +23,36 @@ final class DictationSettingsTests: XCTestCase {
 
             settings.shortcut = shortcut
             settings.activationMode = .toggle
+            settings.transcriptionLanguage = .german
 
             XCTAssertEqual(settings.shortcut, shortcut)
             XCTAssertEqual(settings.shortcut.displayName, "⇧⌘Space")
             XCTAssertEqual(settings.activationMode, .toggle)
+            XCTAssertEqual(settings.transcriptionLanguage, .german)
         }
+    }
+
+    func testLanguageSelectsCompatibleModelAndDecodeOptions() {
+        XCTAssertEqual(
+            ModelRegistry.preferred(for: .english)?.id,
+            "whisper-base.en"
+        )
+        XCTAssertEqual(
+            ModelRegistry.preferred(for: .german)?.id,
+            "whisper-base"
+        )
+        XCTAssertEqual(
+            ModelRegistry.preferred(for: .automatic)?.id,
+            "whisper-base"
+        )
+
+        let automatic = WhisperKitTranscriber.decodingOptions(for: .automatic)
+        XCTAssertTrue(automatic.detectLanguage)
+        XCTAssertNil(automatic.language)
+
+        let german = WhisperKitTranscriber.decodingOptions(for: .german)
+        XCTAssertFalse(german.detectLanguage)
+        XCTAssertEqual(german.language, "de")
     }
 
     func testNamesLeftAndRightModifierShortcuts() {

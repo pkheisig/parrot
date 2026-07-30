@@ -26,6 +26,15 @@ enum ModelRegistry {
             recommended: false
         ),
         TranscriptionModel(
+            id: "whisper-base",
+            displayName: "Whisper Base (Multilingual)",
+            engine: .whisperKit,
+            whisperKitID: "openai_whisper-base",
+            sizeMB: 147,
+            languages: ["multi"],
+            recommended: false
+        ),
+        TranscriptionModel(
             id: "whisper-small.en",
             displayName: "Whisper Small (English)",
             engine: .whisperKit,
@@ -42,5 +51,14 @@ enum ModelRegistry {
 
     static func recommended() -> TranscriptionModel? {
         shared.first { $0.recommended } ?? shared.first
+    }
+
+    static func preferred(for language: TranscriptionLanguage) -> TranscriptionModel? {
+        switch language {
+        case .english:
+            return find("whisper-base.en")
+        case .automatic, .german:
+            return find("whisper-base")
+        }
     }
 }

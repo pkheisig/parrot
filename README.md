@@ -6,12 +6,14 @@ A minimal macOS dictation daemon. Push-to-talk, on-device transcription, text in
 
 ```sh
 ./scripts/build-app.sh
-open dist/Parrot.app
+open /Applications/Parrot.app
 ```
 
-This creates a native menu-bar application at `dist/Parrot.app`. Move it to
-`/Applications` if you want a stable location, then enable **Launch Parrot at
-login** from the menu-bar settings popover.
+This creates a native menu-bar application at `dist/Parrot.app` and replaces
+the validated Parrot bundle at `/Applications/Parrot.app`. Because local
+ad-hoc signatures change on rebuild, the script resets Accessibility and
+Microphone consent and launches the new app. Re-enable the permissions when
+macOS prompts. Enable **Launch Parrot at login** from the menu-bar popover.
 
 ## Command-line install
 
@@ -33,6 +35,12 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
 4. **The transcript types itself in at the cursor** when you release. Usually within 200-300ms.
 
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
+
+The **Language** setting supports English, German, or Automatic recognition.
+German and Automatic use the 147 MB multilingual Whisper Base model, which
+downloads to WhisperKit's local cache on first use. Audio remains on the Mac.
+Whisper Large v3 Turbo remains available through the CLI when maximum accuracy
+is worth a much larger model and slower startup.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 

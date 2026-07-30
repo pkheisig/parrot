@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import ArgumentParser
 import Foundation
 import WhisperKit
@@ -56,29 +57,17 @@ struct Run: ParsableCommand {
             }
             chosenModel = m
         } else {
-            guard let m = ModelRegistry.recommended() else {
+            guard let m = ModelRegistry.preferred(for: settings.transcriptionLanguage) else {
                 FileHandle.standardError.write(Data("no models registered\n".utf8))
                 throw ExitCode(1)
             }
             chosenModel = m
         }
 
-        let transcriber = WhisperKitTranscriber(model: chosenModel)
-        let warmupSemaphore = DispatchSemaphore(value: 0)
-        var warmupError: Error?
-        Task.detached {
-            do {
-                try await transcriber.warmUp()
-            } catch {
-                warmupError = error
-            }
-            warmupSemaphore.signal()
-        }
-        warmupSemaphore.wait()
-        if let warmupError {
-            FileHandle.standardError.write(Data("warmup failed: \(warmupError)\n".utf8))
-            throw ExitCode(1)
-        }
+        let transcriptionService = TranscriptionService(
+            model: chosenModel,
+            language: settings.transcriptionLanguage
+        )
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -96,6 +85,9 @@ struct Run: ParsableCommand {
         var activationMode = settings.activationMode
         var recordingMode = activationMode
         var isRecording = false
+        let readiness = MainActor.assumeIsolated {
+            RuntimeReadiness(modelReady: !isAppBundle)
+        }
         MainActor.assumeIsolated {
             menuBar.onShortcutChanged = { shortcut in
                 monitor.setShortcut(shortcut)
@@ -103,57 +95,156 @@ struct Run: ParsableCommand {
             menuBar.onActivationModeChanged = { mode in
                 activationMode = mode
             }
-        }
-
-        do {
-            try monitor.start { event in
-                switch event {
-                case .pressed:
-                    if recordingMode == .toggle, isRecording {
-                        isRecording = false
-                        let samples = capture.stop()
-                        transcribe(
-                            samples: samples,
-                            transcriber: transcriber,
-                            overlay: overlay,
-                            menuBar: menuBar,
-                            dumpWav: dumpWav
-                        )
-                        return
-                    }
-                    guard !isRecording else { return }
+            menuBar.onLanguageChanged = { language in
+                menuBar.setLoading(language)
+                Task {
                     do {
-                        try capture.start()
-                        isRecording = true
-                        recordingMode = activationMode
-                        FileHandle.standardError.write(Data("● recording\n".utf8))
-                        MainActor.assumeIsolated {
-                            overlay?.show(.recording)
-                            menuBar.setRecording(true)
+                        guard let modelID = try await transcriptionService.setLanguage(language)
+                        else { return }
+                        await MainActor.run {
+                            menuBar.setReady(modelID: modelID, language: language)
                         }
                     } catch {
-                        FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
+                        FileHandle.standardError.write(Data(
+                            "language model load failed: \(error)\n".utf8
+                        ))
+                        await MainActor.run {
+                            menuBar.setLanguageError("model load failed · try again")
+                        }
                     }
-                case .released:
-                    guard recordingMode == .hold, isRecording else { return }
+                }
+            }
+        }
+
+        let handleHotkey: (HotkeyMonitor.Event) -> Void = { event in
+            switch event {
+            case .pressed:
+                guard MainActor.assumeIsolated({ readiness.modelReady }) else {
+                    MainActor.assumeIsolated {
+                        menuBar.setUnavailable("model is still loading…")
+                    }
+                    return
+                }
+                if recordingMode == .toggle, isRecording {
                     isRecording = false
                     let samples = capture.stop()
                     transcribe(
                         samples: samples,
-                        transcriber: transcriber,
+                        transcriptionService: transcriptionService,
                         overlay: overlay,
                         menuBar: menuBar,
                         dumpWav: dumpWav
                     )
+                    return
+                }
+                guard !isRecording else { return }
+                do {
+                    try capture.start()
+                    isRecording = true
+                    recordingMode = activationMode
+                    FileHandle.standardError.write(Data("● recording\n".utf8))
+                    MainActor.assumeIsolated {
+                        overlay?.show(.recording)
+                        menuBar.setRecording(true)
+                    }
+                } catch {
+                    FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
+                }
+            case .released:
+                guard recordingMode == .hold, isRecording else { return }
+                isRecording = false
+                let samples = capture.stop()
+                transcribe(
+                    samples: samples,
+                    transcriptionService: transcriptionService,
+                    overlay: overlay,
+                    menuBar: menuBar,
+                    dumpWav: dumpWav
+                )
+            }
+        }
+
+        if isAppBundle {
+            MainActor.assumeIsolated {
+                menuBar.setLoading(settings.transcriptionLanguage)
+            }
+
+            do {
+                try monitor.start(onEvent: handleHotkey)
+                MainActor.assumeIsolated {
+                    readiness.monitorStarted = true
+                }
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "failed to register hotkey tap: \(error)\n".utf8
+                ))
+                MainActor.assumeIsolated {
+                    menuBar.setUnavailable(
+                        "Accessibility required · enable Parrot; it will reconnect"
+                    )
+                    _ = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { timer in
+                        guard AXIsProcessTrusted() else { return }
+                        Task { @MainActor in
+                            do {
+                                try monitor.start(onEvent: handleHotkey)
+                                readiness.monitorStarted = true
+                                timer.invalidate()
+                                if readiness.modelReady {
+                                    menuBar.setReady(
+                                        modelID: chosenModel.id,
+                                        language: settings.transcriptionLanguage
+                                    )
+                                } else {
+                                    menuBar.setLoading(settings.transcriptionLanguage)
+                                }
+                            } catch {
+                                // Permission propagation can lag briefly after
+                                // the Settings toggle. Keep retrying until the tap exists.
+                            }
+                        }
+                    }
                 }
             }
-        } catch {
-            FileHandle.standardError.write(Data("failed to register hotkey tap: \(error)\n".utf8))
-            if isAppBundle {
-                MainActor.assumeIsolated {
-                    menuBar.setUnavailable("Accessibility required · enable Parrot, then relaunch")
+
+            Task {
+                do {
+                    try await transcriptionService.warmUp()
+                } catch {
+                    FileHandle.standardError.write(Data("warmup failed: \(error)\n".utf8))
+                    await MainActor.run {
+                        menuBar.setLanguageError("model load failed · check your connection")
+                    }
+                    return
                 }
-            } else {
+                await MainActor.run {
+                    readiness.modelReady = true
+                    if readiness.monitorStarted {
+                        menuBar.setReady(
+                            modelID: chosenModel.id,
+                            language: settings.transcriptionLanguage
+                        )
+                    }
+                }
+            }
+        } else {
+            let warmupSemaphore = DispatchSemaphore(value: 0)
+            var warmupError: Error?
+            Task.detached {
+                do {
+                    try await transcriptionService.warmUp()
+                } catch {
+                    warmupError = error
+                }
+                warmupSemaphore.signal()
+            }
+            warmupSemaphore.wait()
+            if let warmupError {
+                FileHandle.standardError.write(Data("warmup failed: \(warmupError)\n".utf8))
+                throw ExitCode(1)
+            }
+            do {
+                try monitor.start(onEvent: handleHotkey)
+            } catch {
                 FileHandle.standardError.write(Data("run `parrot setup` to configure permissions.\n".utf8))
                 throw ExitCode(1)
             }
@@ -176,9 +267,19 @@ struct Run: ParsableCommand {
     }
 }
 
+@MainActor
+private final class RuntimeReadiness {
+    var modelReady: Bool
+    var monitorStarted = false
+
+    init(modelReady: Bool) {
+        self.modelReady = modelReady
+    }
+}
+
 private func transcribe(
     samples: [Float],
-    transcriber: WhisperKitTranscriber,
+    transcriptionService: TranscriptionService,
     overlay: RecordingOverlay?,
     menuBar: MenuBarController,
     dumpWav: Bool
@@ -211,7 +312,7 @@ private func transcribe(
     Task {
         let started = Date()
         do {
-            let text = try await transcriber.transcribe(samples)
+            let text = try await transcriptionService.transcribe(samples)
             let elapsed = Date().timeIntervalSince(started)
             FileHandle.standardError.write(Data(
                 String(format: "→ %.2fs · %@\n", elapsed, text).utf8
