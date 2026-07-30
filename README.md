@@ -2,7 +2,18 @@
 
 A minimal macOS dictation daemon. Push-to-talk, on-device transcription, text inserted at the cursor.
 
-## Install
+## Build and run as an app
+
+```sh
+./scripts/build-app.sh
+open dist/Parrot.app
+```
+
+This creates a native menu-bar application at `dist/Parrot.app`. Move it to
+`/Applications` if you want a stable location, then enable **Launch Parrot at
+login** from the menu-bar settings popover.
+
+## Command-line install
 
 ```sh
 curl -fsSL https://digimata.github.io/parrot/install.sh | sh
@@ -16,14 +27,14 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
 
 ## How to use
 
-1. **Run it.** Either `parrot install --launch-at-login` (daemonized, runs forever, lives in the menu bar), or `parrot` in any terminal tab.
+1. **Run it.** Open `Parrot.app`, or run `parrot` in a terminal.
 2. **Click into the text field you want to dictate into** — Messages, the address bar, a Slack thread, anywhere a cursor blinks.
-3. **Hold the `fn` key, speak, release.** A small pill appears at the bottom of the screen while the mic is hot.
+3. **Hold the `fn` key, speak, release.** A small pill appears at the bottom of the screen while the mic is hot. Click the Parrot menu-bar icon to record a different shortcut or switch to **Toggle** (press once to start, once again to stop).
 4. **The transcript types itself in at the cursor** when you release. Usually within 200-300ms.
 
-That's it. There is no record button, no stop button, no "send" — `fn` is the whole interface.
+That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
 
-> **Note:** on most modern Macs the `fn` key is the bottom-left key. If yours is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
+> **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
 ## CLI
 
@@ -36,7 +47,6 @@ parrot doctor                          # check permissions + fn key setting
 parrot models list                     # list available models
 parrot models download <id>            # pre-download a model
 parrot --model whisper-large-v3-turbo  # bigger, multilingual, slower first-run
-parrot --hotkey right-option           # change the push-to-talk key
 parrot --no-overlay                    # disable the bottom-of-screen pill
 ```
 

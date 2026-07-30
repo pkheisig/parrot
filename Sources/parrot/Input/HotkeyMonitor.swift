@@ -3,24 +3,28 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// Watches a single modifier key (default: Fn) and emits press/release edges.
+/// Watches a configurable global shortcut and emits press/release edges.
 /// Requires Accessibility permission. If the tap fails to register, callers
 /// will see an error from `start()`.
 final class HotkeyMonitor {
     enum Event { case pressed, released }
     enum HotkeyError: Error { case tapCreateFailed }
 
-    /// Mask of the modifier we treat as the hotkey. Fn = `.maskSecondaryFn`.
-    private let mask: CGEventFlags
+    private var shortcut: HotkeyShortcut
     private let debug: Bool
     private var onEvent: ((Event) -> Void)?
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
 
-    init(mask: CGEventFlags = .maskSecondaryFn, debug: Bool = false) {
-        self.mask = mask
+    init(shortcut: HotkeyShortcut = .fn, debug: Bool = false) {
+        self.shortcut = shortcut
         self.debug = debug
+    }
+
+    func setShortcut(_ shortcut: HotkeyShortcut) {
+        self.shortcut = shortcut
+        isPressed = false
     }
 
     func start(onEvent: @escaping (Event) -> Void) throws {
@@ -86,12 +90,39 @@ final class HotkeyMonitor {
                         .utf8
                 ))
         }
-        guard type == .flagsChanged else { return }
-        let pressed = event.flags.contains(mask)
-        guard pressed != isPressed else { return }
-        isPressed = pressed
-        onEvent?(pressed ? .pressed : .released)
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+
+        if shortcut.isModifierOnly {
+            guard type == .flagsChanged, keyCode == shortcut.keyCode else { return }
+            let pressed = event.flags.contains(shortcut.modifiers)
+            guard pressed != isPressed else { return }
+            isPressed = pressed
+            onEvent?(pressed ? .pressed : .released)
+            return
+        }
+
+        guard keyCode == shortcut.keyCode else { return }
+        switch type {
+        case .keyDown:
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            guard !isRepeat,
+                  !isPressed,
+                  event.flags.intersection(Self.supportedModifiers) == shortcut.modifiers
+            else { return }
+            isPressed = true
+            onEvent?(.pressed)
+        case .keyUp:
+            guard isPressed else { return }
+            isPressed = false
+            onEvent?(.released)
+        default:
+            break
+        }
     }
+
+    private static let supportedModifiers: CGEventFlags = [
+        .maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn,
+    ]
 }
 
 private func hotkeyCallback(

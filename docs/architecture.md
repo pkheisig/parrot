@@ -2,8 +2,8 @@
 
 ## Goals
 
-1. **CLI executable.** Single binary, launched from the terminal. No menubar, no dock icon, no settings window.
-2. **Push-to-talk.** Hold Fn, speak, release — transcript appears at the cursor.
+1. **Native menu-bar app.** A normal `.app` bundle wrapping one executable, with a menu-bar control surface and no dock icon.
+2. **Configurable activation.** Record any supported global shortcut and choose hold-to-talk or press-once-to-start/press-again-to-stop.
 3. **Minimal recording feedback.** A small floating pill at the bottom of the screen while recording, so the user knows the mic is hot. Click-through, borderless, hidden when idle.
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Pluggable models.** Whisper out of the box; Parakeet (or future engines) via a JSON-driven registry.
@@ -12,7 +12,7 @@
 ## Non-goals
 
 - Cross-platform (macOS only)
-- Menubar, dock icon, settings window, preferences UI
+- Dock icon or full preferences application
 - Cloud transcription providers
 - AI post-processing, summarization, agents
 - Speaker diarization, meeting recording, semantic search
@@ -25,7 +25,7 @@
 - **Permissions plumbing** (microphone, accessibility) is dramatically smoother in a Swift binary than via Rust crates.
 - **AppKit overlay for free.** The recording indicator (see below) is a borderless `NSWindow` — trivial in Swift, awkward in Rust.
 
-The binary is a Swift Package executable — `swift build`, `swift run`, ship a single binary. Even with the overlay window, there is no `.app` bundle, no menubar entry, no dock icon.
+The implementation remains a Swift Package executable. `scripts/build-app.sh` wraps the release binary and its `Info.plist` in `Parrot.app`, then applies an ad-hoc local signature. There is no dock icon.
 
 ## High-level shape
 
@@ -75,7 +75,7 @@ Subcommands:
 
 ### `HotkeyMonitor`
 
-Global hotkey via `CGEventTap` (requires Accessibility permission). Default: **hold Fn**. Detected via `flagsChanged` events with `NSEvent.ModifierFlags.function` / `kCGEventFlagMaskSecondaryFn`. Emits `.pressed` / `.released`. Configurable via `--hotkey` flag or config file.
+Global hotkey via `CGEventTap` (requires Accessibility permission). Default: **hold Fn**. Modifier-only shortcuts are detected through `flagsChanged`; shortcut combinations use key-down/key-up events with exact modifier matching. Emits `.pressed` / `.released`. The menu-bar shortcut recorder persists the selection in the `com.digimata.parrot` user-defaults suite.
 
 **Fn key caveat:** macOS by default maps the Fn (🌐) key to "Show Emoji & Symbols" or "Start Dictation" depending on the user's setting in System Settings → Keyboard → Press 🌐 key to. The CGEventTap sees the keypress regardless, but the system action also fires. `parrot doctor` will detect this setting and instruct the user to change it to "Do Nothing" so Fn becomes a clean modifier.
 
@@ -122,7 +122,7 @@ States:
 - **Transcribing** — brief spinner state between hotkey release and text injection (usually <500 ms).
 - **Hidden** — back to idle after injection.
 
-This is the only reason the process needs an `NSApplication` run loop instead of a bare `CFRunLoop`.
+The recording overlay and menu-bar settings popover require the `NSApplication` run loop.
 
 ### `ModelRegistry`
 
@@ -150,18 +150,13 @@ The registry is the single source of truth for: download URLs, file names, sizes
 
 On first selection (or via `parrot models download <id>`), downloads to `~/Library/Application Support/parrot/models/<engine>/<id>/`. Progress bar to stderr (using `\r` overwrites). Resumable, validates size. Refuses to start the daemon if the selected model isn't present.
 
-### `Config`
+### `DictationSettings`
 
-Plain `Codable` struct. Loaded from (in order): CLI flags > `~/.config/parrot/config.toml` > defaults.
+Persists the recorded shortcut and activation mode in the `com.digimata.parrot` user-defaults suite. Defaults remain Fn + Hold.
 
-```toml
-model = "whisper-large-v3-turbo"
-hotkey = "fn"
-inject_mode = "paste"   # or "type-unicode"
-overlay = true          # show recording pill at bottom of screen
-```
+### `MenuBarController`
 
-CLI flags override the file. No settings UI; you edit the TOML.
+Owns the status item and transient AppKit popover. It displays current state/model, records shortcut combinations or modifier-only keys, switches between Hold and Toggle behavior, controls the `SMAppService.mainApp` launch-at-login registration, and provides Quit.
 
 ## Permissions
 
@@ -216,7 +211,7 @@ End-to-end latency target: <500 ms after hotkey release for utterances under 10 
 - No VAD-based hands-free mode. Push-to-talk is more reliable and uses zero idle CPU.
 - No history, transcript log, or clipboard manager. Output goes to the cursor and that's it.
 - No custom vocabulary, prompts, or post-processing.
-- No menubar, no settings window, no preferences panel. The only UI is the recording overlay. Configuration is flags + TOML.
+- No full preferences window or transcript/history UI. Configuration stays intentionally limited to the compact menu-bar popover.
 
 These are deliberate cuts. Each can be revisited if real usage demands it.
 
