@@ -25,7 +25,7 @@ parrot setup                       # grants mic + accessibility, downloads the m
 parrot install --launch-at-login   # optional — runs in the background on login
 ```
 
-**Requires:** macOS 14+ on Apple Silicon (M1 or newer). Transcription runs on the Apple Neural Engine via CoreML — so the installer refuses to run on Intel.
+**Requires:** macOS 14+ on Apple Silicon (M1 or newer). Transcription runs locally through CoreML/Metal, so the installer refuses to run on Intel.
 
 The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned for now, so the installer strips the quarantine xattr — once you've inspected the script you'll see exactly what it does.
 
@@ -50,8 +50,8 @@ Automatic mode. To teach a spelling:
 
 For example, changing `spectra easy` to `Spectreasy` teaches Parrot to replace
 that recognition next time. Learned aliases are applied deterministically to
-both English and German output; compatible specialist engines also receive the
-canonical spellings as prompt vocabulary. The dictionary is never supplied to
+both English and German output; the German specialist also receives canonical
+spellings as prompt vocabulary. The dictionary is never supplied to
 the automatic language detector.
 
 Open **Dictionary…** in the menu-bar settings to add, edit, or remove mappings.
@@ -61,9 +61,9 @@ Entries are stored locally at
 The **Language** setting supports English, German, or Automatic recognition.
 Automatic first uses the stronger 488 MB multilingual Whisper Small model to detect the
 language. Confident English is then transcribed with the English-specific
-Whisper Base model; confident German is transcribed with the German-specific
+Whisper Large v3 Turbo model; confident German is transcribed with the German-specific
 Whisper Large v3 Turbo Q5 model. Other or ambiguous languages fall back to the
-multilingual model. The English (~145 MB) and German (~548 MB) specialists are
+multilingual model. The English (~1.62 GB) and German (~548 MB) specialists are
 prefetched in the background on first app launch and cached locally. Audio
 remains on the Mac; only model downloads use the network.
 

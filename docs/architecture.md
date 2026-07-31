@@ -129,7 +129,7 @@ transcript.
 ### `CorrectionDictionaryStore`
 
 Persists universal `recognized → canonical` mappings in Application Support.
-Canonical terms prompt compatible specialist engines only after language
+Canonical terms prompt the compatible German specialist only after language
 selection; aliases are then applied to every finished transcript using
 case-insensitive, longest-first, Unicode word-boundary matching. The language
 detector is deliberately never prompted by the dictionary.
@@ -220,9 +220,9 @@ Initial registry:
 | Engine | Model | Size | Notes |
 |---|---|---|---|
 | WhisperKit | `whisper-small` | ~488 MB | Automatic detector and fallback |
-| WhisperKit | `whisper-base.en` | ~145 MB | English specialist |
+| WhisperKit | `whisper-large-v3-turbo` | ~1.62 GB | English specialist, decoded as English |
 | whisper.cpp | `whisper-large-v3-turbo-german-q5` | ~548 MB | German specialist |
-| WhisperKit | `whisper-large-v3-turbo` | ~1.6 GB | Optional multilingual CLI model |
+| WhisperKit | `whisper-base.en` | ~145 MB | Optional compact English CLI model |
 
 Models are not bundled. WhisperKit uses its own cache; the German GGML model
 lives under `~/Library/Application Support/Parrot/Models/`.

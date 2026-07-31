@@ -45,8 +45,9 @@ final class DictationSettingsTests: XCTestCase {
     func testLanguageSelectsCompatibleModelAndDecodeOptions() {
         XCTAssertEqual(
             ModelRegistry.preferred(for: .english)?.id,
-            "whisper-base.en"
+            "whisper-large-v3-turbo"
         )
+        XCTAssertEqual(ModelRegistry.preferred(for: .english)?.sizeMB, 1_620)
         XCTAssertEqual(
             ModelRegistry.preferred(for: .german)?.id,
             "whisper-large-v3-turbo-german-q5"

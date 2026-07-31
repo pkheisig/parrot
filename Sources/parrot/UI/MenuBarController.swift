@@ -63,7 +63,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             }
         }
         contentController.onLanguageChanged = { [weak self] language in
-            self?.onLanguageChanged?(language)
+            guard let self else { return }
+            // Persist the requested language before its model finishes loading.
+            // Large specialists can take time to download on first selection;
+            // quitting during that load must not silently restore Automatic.
+            self.settings.transcriptionLanguage = language
+            self.onLanguageChanged?(language)
         }
         contentController.onLearningShortcutChanged = { [weak self] shortcut in
             guard let self else { return }

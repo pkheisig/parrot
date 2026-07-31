@@ -6,19 +6,16 @@ actor WhisperKitTranscriber: Transcriber {
     let modelID: String
     private let model: TranscriptionModel
     private let language: TranscriptionLanguage
-    private let dictionary: CorrectionDictionaryStore?
     private var pipeline: WhisperKit?
 
     init(
         model: TranscriptionModel,
-        language: TranscriptionLanguage = .english,
-        dictionary: CorrectionDictionaryStore? = nil
+        language: TranscriptionLanguage = .english
     ) {
         self.modelID = model.id
         self.model = model
         // English-only checkpoints cannot perform language detection.
         self.language = model.languages.contains("multi") ? language : .english
-        self.dictionary = dictionary
     }
 
     /// Loads the model into memory; downloads first if not already on disk.
@@ -58,26 +55,9 @@ actor WhisperKitTranscriber: Transcriber {
         if pipeline == nil { try await warmUp() }
         guard let pipeline else { throw TranscriberError.notLoaded }
 
-        var options = Self.decodingOptions(for: language)
-        // WhisperKit 0.9's English-only CoreML decoder returns an empty result
-        // when promptTokens are prepended. Keep its deterministic correction
-        // pass, but only use prompt biasing with multilingual checkpoints.
-        if model.languages.contains("multi"),
-           language != .automatic,
-           let prompt = dictionary?.promptText(),
-           let tokenizer = pipeline.tokenizer {
-            options.promptTokens = tokenizer
-                .encode(text: " " + prompt)
-                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-            options.usePrefillPrompt = true
-            options.usePrefillCache = false
-            options.skipSpecialTokens = true
-            options.noSpeechThreshold = nil
-        }
-
         let results = try await pipeline.transcribe(
             audioArray: audio,
-            decodeOptions: options
+            decodeOptions: Self.decodingOptions(for: language)
         )
         let raw = results.map(\.text).joined(separator: " ")
         let sanitized = Self.sanitize(raw)
@@ -216,8 +196,7 @@ actor TranscriptionService {
         )
         self.english = WhisperKitTranscriber(
             model: englishModel,
-            language: .english,
-            dictionary: dictionary
+            language: .english
         )
         self.german = WhisperCppTranscriber(model: germanModel, dictionary: dictionary)
         self.language = language
@@ -303,8 +282,7 @@ actor TranscriptionService {
         case .whisperKit:
             WhisperKitTranscriber(
                 model: model,
-                language: language,
-                dictionary: dictionary
+                language: language
             )
         case .whisperCpp:
             WhisperCppTranscriber(model: model, dictionary: dictionary)

@@ -77,7 +77,7 @@ enum ModelRegistry {
     static func preferred(for language: TranscriptionLanguage) -> TranscriptionModel? {
         switch language {
         case .english:
-            return find("whisper-base.en")
+            return find("whisper-large-v3-turbo")
         case .automatic:
             return find("whisper-small")
         case .german:
