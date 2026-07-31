@@ -161,6 +161,15 @@ struct Run: ParsableCommand {
                     menuBar: menuBar,
                     dumpWav: dumpWav
                 )
+            case .cancelRequested:
+                guard isRecording else { return }
+                isRecording = false
+                _ = capture.stop()
+                FileHandle.standardError.write(Data("recording canceled\n".utf8))
+                MainActor.assumeIsolated {
+                    overlay?.hide()
+                    menuBar.setRecording(false)
+                }
             }
         }
 

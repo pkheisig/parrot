@@ -31,7 +31,7 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
 
 1. **Run it.** Open `Parrot.app`, or run `parrot` in a terminal.
 2. **Click into the text field you want to dictate into** — Messages, the address bar, a Slack thread, anywhere a cursor blinks.
-3. **Hold the `fn` key, speak, release.** A small pill appears at the bottom of the screen while the mic is hot. Click the Parrot menu-bar icon to record a different shortcut or switch to **Toggle** (press once to start, once again to stop).
+3. **Hold the `fn` key, speak, release.** A small pill appears at the bottom of the screen while the mic is hot. Press **Escape** to cancel and discard the recording. Click the Parrot menu-bar icon to record a different shortcut or switch to **Toggle** (press once to start, once again to stop).
 4. **The transcript types itself in at the cursor** when you release. Usually within 200-300ms.
 
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.

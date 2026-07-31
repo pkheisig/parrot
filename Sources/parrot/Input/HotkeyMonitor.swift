@@ -7,8 +7,10 @@ import Foundation
 /// Requires Accessibility permission. If the tap fails to register, callers
 /// will see an error from `start()`.
 final class HotkeyMonitor {
-    enum Event { case pressed, released }
+    enum Event { case pressed, released, cancelRequested }
     enum HotkeyError: Error { case tapCreateFailed }
+
+    static let escapeKeyCode: CGKeyCode = 53
 
     private var shortcut: HotkeyShortcut
     private let debug: Bool
@@ -91,6 +93,14 @@ final class HotkeyMonitor {
                 ))
         }
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+
+        // Escape is a global recording cancel independent of the configured
+        // dictation shortcut. Only emit on the initial key-down edge.
+        if Self.isCancelEvent(type: type, keyCode: keyCode, isRepeat: isRepeat) {
+            onEvent?(.cancelRequested)
+            return
+        }
 
         if shortcut.isModifierOnly {
             guard type == .flagsChanged, keyCode == shortcut.keyCode else { return }
@@ -104,7 +114,6 @@ final class HotkeyMonitor {
         guard keyCode == shortcut.keyCode else { return }
         switch type {
         case .keyDown:
-            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             guard !isRepeat,
                   !isPressed,
                   event.flags.intersection(Self.supportedModifiers) == shortcut.modifiers
@@ -118,6 +127,14 @@ final class HotkeyMonitor {
         default:
             break
         }
+    }
+
+    static func isCancelEvent(
+        type: CGEventType,
+        keyCode: CGKeyCode,
+        isRepeat: Bool
+    ) -> Bool {
+        type == .keyDown && keyCode == escapeKeyCode && !isRepeat
     }
 
     private static let supportedModifiers: CGEventFlags = [
