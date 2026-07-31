@@ -45,6 +45,13 @@ struct HotkeyShortcut: Codable, Equatable {
         modifiersRawValue: CGEventFlags.maskSecondaryFn.rawValue,
         isModifierOnly: true
     )
+    static let learnCorrection = HotkeyShortcut(
+        keyCode: 37,
+        modifiersRawValue: (
+            CGEventFlags.maskControl.union(.maskAlternate)
+        ).rawValue,
+        isModifierOnly: false
+    )
 
     var modifiers: CGEventFlags {
         CGEventFlags(rawValue: modifiersRawValue)
@@ -110,6 +117,7 @@ struct HotkeyShortcut: Codable, Equatable {
 final class DictationSettings {
     private enum Key {
         static let shortcut = "dictationShortcut"
+        static let learningShortcut = "learningShortcut"
         static let activationMode = "activationMode"
         static let transcriptionLanguage = "transcriptionLanguage"
     }
@@ -148,6 +156,19 @@ final class DictationSettings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Key.activationMode)
+        }
+    }
+
+    var learningShortcut: HotkeyShortcut {
+        get {
+            guard let data = defaults.data(forKey: Key.learningShortcut),
+                  let shortcut = try? JSONDecoder().decode(HotkeyShortcut.self, from: data)
+            else { return .learnCorrection }
+            return shortcut
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: Key.learningShortcut)
         }
     }
 

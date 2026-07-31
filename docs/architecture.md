@@ -8,7 +8,9 @@
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Language-specialized models.** Detect English or German with multilingual
    Whisper, then route the same recording to the corresponding specialist.
-6. **Native and lean.** One Swift Package executable target. No sidecar processes. No HTTP servers.
+6. **Learned vocabulary.** Compare the last inserted transcript with the user's
+   in-place correction and persist a universal alias-to-canonical mapping.
+7. **Native and lean.** One Swift Package executable target. No sidecar processes. No HTTP servers.
 
 ## Non-goals
 
@@ -113,6 +115,20 @@ Adding an engine = one new file conforming to `Transcriber`.
 ### `TextInjector`
 
 `CGEventCreateKeyboardEvent` + `CGEventKeyboardSetUnicodeString` — pastes the transcript at the current cursor position. Works in nearly every text field on macOS (some Electron apps and secure fields are flaky; platform constraint).
+
+Before injection, `FocusedTextSnapshot` records the focused Accessibility text
+element, insertion range, and short surrounding anchors. Pressing the Learn
+hotkey within five minutes extracts the edited span, computes word-level
+replacement hunks, and asks for confirmation. Selecting the corrected phrase
+provides a fallback when an application does not expose its complete text value.
+
+### `CorrectionDictionaryStore`
+
+Persists universal `recognized → canonical` mappings in Application Support.
+Canonical terms prompt compatible specialist engines only after language
+selection; aliases are then applied to every finished transcript using
+case-insensitive, longest-first, Unicode word-boundary matching. The language
+detector is deliberately never prompted by the dictionary.
 
 ### `RecordingOverlay`
 
@@ -262,8 +278,12 @@ parrot/
       AudioCapture.swift        # AVAudioEngine tap + ring buffer
 
     Input/
+      CorrectionLearning.swift  # focused-field snapshot + correction diff
       HotkeyMonitor.swift       # CGEventTap
       TextInjector.swift        # CGEvent posting
+
+    Vocabulary/
+      CorrectionDictionary.swift
 
     UI/
       RecordingOverlay.swift    # borderless NSWindow + SwiftUI pill

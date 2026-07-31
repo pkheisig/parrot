@@ -6,6 +6,7 @@ final class DictationSettingsTests: XCTestCase {
     func testDefaultsToFnAndHold() {
         withSettings { settings in
             XCTAssertEqual(settings.shortcut, .fn)
+            XCTAssertEqual(settings.learningShortcut, .learnCorrection)
             XCTAssertEqual(settings.activationMode, .hold)
             XCTAssertEqual(settings.transcriptionLanguage, .automatic)
         }
@@ -20,12 +21,21 @@ final class DictationSettingsTests: XCTestCase {
                 ).rawValue,
                 isModifierOnly: false
             )
+            let learningShortcut = HotkeyShortcut(
+                keyCode: 3,
+                modifiersRawValue: (
+                    CGEventFlags.maskCommand.union(.maskShift)
+                ).rawValue,
+                isModifierOnly: false
+            )
 
             settings.shortcut = shortcut
+            settings.learningShortcut = learningShortcut
             settings.activationMode = .toggle
             settings.transcriptionLanguage = .german
 
             XCTAssertEqual(settings.shortcut, shortcut)
+            XCTAssertEqual(settings.learningShortcut, learningShortcut)
             XCTAssertEqual(settings.shortcut.displayName, "⇧⌘Space")
             XCTAssertEqual(settings.activationMode, .toggle)
             XCTAssertEqual(settings.transcriptionLanguage, .german)

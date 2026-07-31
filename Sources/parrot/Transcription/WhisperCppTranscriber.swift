@@ -6,11 +6,13 @@ actor WhisperCppTranscriber: Transcriber {
     let modelID: String
 
     private let model: TranscriptionModel
+    private let dictionary: CorrectionDictionaryStore?
     private var context: OpaquePointer?
 
-    init(model: TranscriptionModel) {
+    init(model: TranscriptionModel, dictionary: CorrectionDictionaryStore? = nil) {
         self.model = model
         self.modelID = model.id
+        self.dictionary = dictionary
     }
 
     deinit {
@@ -49,16 +51,26 @@ actor WhisperCppTranscriber: Transcriber {
         parameters.single_segment = false
         parameters.n_threads = Int32(max(1, min(8, ProcessInfo.processInfo.processorCount - 2)))
 
-        let result = "de".withCString { language in
-            parameters.language = language
-            return audio.withUnsafeBufferPointer { samples in
-                whisper_full(
-                    context,
-                    parameters,
-                    samples.baseAddress,
-                    Int32(samples.count)
-                )
+        func run(prompt: UnsafePointer<CChar>?) -> Int32 {
+            parameters.initial_prompt = prompt
+            return "de".withCString { language in
+                parameters.language = language
+                return audio.withUnsafeBufferPointer { samples in
+                    whisper_full(
+                        context,
+                        parameters,
+                        samples.baseAddress,
+                        Int32(samples.count)
+                    )
+                }
             }
+        }
+
+        let result: Int32
+        if let prompt = dictionary?.promptText() {
+            result = prompt.withCString { run(prompt: $0) }
+        } else {
+            result = run(prompt: nil)
         }
         guard result == 0 else {
             throw WhisperCppError.transcriptionFailed(result)

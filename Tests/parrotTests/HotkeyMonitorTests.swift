@@ -39,4 +39,35 @@ final class HotkeyMonitorTests: XCTestCase {
             )
         )
     }
+
+    func testLearningShortcutRequiresExactModifiersAndInitialKeyDown() {
+        let shortcut = HotkeyShortcut.learnCorrection
+        XCTAssertTrue(
+            HotkeyMonitor.isLearningEvent(
+                type: .keyDown,
+                keyCode: 37,
+                flags: [.maskControl, .maskAlternate],
+                isRepeat: false,
+                shortcut: shortcut
+            )
+        )
+        XCTAssertFalse(
+            HotkeyMonitor.isLearningEvent(
+                type: .keyDown,
+                keyCode: 37,
+                flags: [.maskControl, .maskAlternate, .maskShift],
+                isRepeat: false,
+                shortcut: shortcut
+            )
+        )
+        XCTAssertFalse(
+            HotkeyMonitor.isLearningEvent(
+                type: .keyDown,
+                keyCode: 37,
+                flags: [.maskControl, .maskAlternate],
+                isRepeat: true,
+                shortcut: shortcut
+            )
+        )
+    }
 }

@@ -40,6 +40,7 @@ struct Run: ParsableCommand {
 
     func run() throws {
         let settings = DictationSettings()
+        let dictionary = CorrectionDictionaryStore()
         let isAppBundle = Bundle.main.bundleURL.pathExtension.lowercased() == "app"
         if !skipDoctor, !isAppBundle {
             let checks = DoctorReport.run(shortcut: settings.shortcut)
@@ -70,7 +71,8 @@ struct Run: ParsableCommand {
         let transcriptionService = TranscriptionService(
             model: chosenModel,
             language: settings.transcriptionLanguage,
-            usesExplicitModel: model != nil
+            usesExplicitModel: model != nil,
+            dictionary: dictionary
         )
         let readyModelID = settings.transcriptionLanguage == .automatic
             ? "automatic · English/German specialists"
@@ -79,8 +81,15 @@ struct Run: ParsableCommand {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
-        let monitor = HotkeyMonitor(shortcut: settings.shortcut, debug: debugHotkey)
+        let monitor = HotkeyMonitor(
+            shortcut: settings.shortcut,
+            learningShortcut: settings.learningShortcut,
+            debug: debugHotkey
+        )
         let capture = AudioCapture()
+        let learningController = MainActor.assumeIsolated {
+            CorrectionLearningController()
+        }
         let dumpWav = self.dumpWav
         let overlay: RecordingOverlay? = noOverlay ? nil : MainActor.assumeIsolated { RecordingOverlay() }
         if let overlay {
@@ -91,7 +100,11 @@ struct Run: ParsableCommand {
         // for /usr/local/bin/parrot.
         let menuBar: MenuBarController? = MainActor.assumeIsolated {
             isAppBundle
-                ? MenuBarController(modelID: chosenModel.id, settings: settings)
+                ? MenuBarController(
+                    modelID: chosenModel.id,
+                    settings: settings,
+                    dictionary: dictionary
+                )
                 : nil
         }
         var activationMode = settings.activationMode
@@ -103,6 +116,9 @@ struct Run: ParsableCommand {
         MainActor.assumeIsolated {
             menuBar?.onShortcutChanged = { shortcut in
                 monitor.setShortcut(shortcut)
+            }
+            menuBar?.onLearningShortcutChanged = { shortcut in
+                monitor.setLearningShortcut(shortcut)
             }
             menuBar?.onActivationModeChanged = { mode in
                 activationMode = mode
@@ -145,7 +161,8 @@ struct Run: ParsableCommand {
                         transcriptionService: transcriptionService,
                         overlay: overlay,
                         menuBar: menuBar,
-                        dumpWav: dumpWav
+                        dumpWav: dumpWav,
+                        learningController: learningController
                     )
                     return
                 }
@@ -171,7 +188,8 @@ struct Run: ParsableCommand {
                     transcriptionService: transcriptionService,
                     overlay: overlay,
                     menuBar: menuBar,
-                    dumpWav: dumpWav
+                    dumpWav: dumpWav,
+                    learningController: learningController
                 )
             case .cancelRequested:
                 guard isRecording else { return }
@@ -181,6 +199,32 @@ struct Run: ParsableCommand {
                 MainActor.assumeIsolated {
                     overlay?.hide()
                     menuBar?.setRecording(false)
+                }
+            case .learnCorrectionRequested:
+                guard !isRecording else {
+                    MainActor.assumeIsolated {
+                        menuBar?.setLearningStatus("finish or cancel recording before learning")
+                    }
+                    return
+                }
+                MainActor.assumeIsolated {
+                    do {
+                        let proposals = try learningController.proposals()
+                        let learned = menuBar?.confirmCorrections(proposals) ?? 0
+                        if learned > 0 {
+                            learningController.clear()
+                            menuBar?.setLearningStatus(
+                                learned == 1
+                                    ? "learned 1 correction"
+                                    : "learned \(learned) corrections"
+                            )
+                        }
+                    } catch {
+                        menuBar?.setLearningStatus(error.localizedDescription)
+                        FileHandle.standardError.write(Data(
+                            "learn correction failed: \(error.localizedDescription)\n".utf8
+                        ))
+                    }
                 }
             }
         }
@@ -303,7 +347,8 @@ private func transcribe(
     transcriptionService: TranscriptionService,
     overlay: RecordingOverlay?,
     menuBar: MenuBarController?,
-    dumpWav: Bool
+    dumpWav: Bool,
+    learningController: CorrectionLearningController
 ) {
     MainActor.assumeIsolated {
         overlay?.show(.transcribing)
@@ -339,7 +384,12 @@ private func transcribe(
                 String(format: "→ %.2fs · %@\n", elapsed, text).utf8
             ))
             await MainActor.run {
+                let snapshot = FocusedTextSnapshot.capture()
                 TextInjector.inject(text)
+                learningController.remember(
+                    insertedText: text,
+                    snapshot: snapshot
+                )
                 overlay?.hide()
                 menuBar?.setRecording(false)
             }
@@ -429,6 +479,12 @@ struct TranscribeFile: ParsableCommand {
     @Option(name: .long, help: "automatic, english, or german")
     var language: String = TranscriptionLanguage.automatic.rawValue
 
+    @Option(name: .long, help: "Temporary correction alias for verification.")
+    var correctionAlias: String?
+
+    @Option(name: .long, help: "Temporary correction spelling for verification.")
+    var correctionCanonical: String?
+
     func run() throws {
         guard let selectedLanguage = TranscriptionLanguage(rawValue: language) else {
             throw ValidationError("language must be automatic, english, or german")
@@ -437,8 +493,30 @@ struct TranscribeFile: ParsableCommand {
             throw ValidationError("no model is registered for \(selectedLanguage.rawValue)")
         }
 
+        guard (correctionAlias == nil) == (correctionCanonical == nil) else {
+            throw ValidationError(
+                "--correction-alias and --correction-canonical must be provided together"
+            )
+        }
+        let dictionary: CorrectionDictionaryStore
+        if let correctionAlias, let correctionCanonical {
+            dictionary = CorrectionDictionaryStore(persistent: false)
+            guard dictionary.upsert(
+                alias: correctionAlias,
+                canonical: correctionCanonical
+            ) != nil else {
+                throw ValidationError("temporary correction is invalid")
+            }
+        } else {
+            dictionary = CorrectionDictionaryStore()
+        }
+
         let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: path)
-        let service = TranscriptionService(model: model, language: selectedLanguage)
+        let service = TranscriptionService(
+            model: model,
+            language: selectedLanguage,
+            dictionary: dictionary
+        )
         let semaphore = DispatchSemaphore(value: 0)
         var capturedResult: Result<String, Error>?
         Task.detached {

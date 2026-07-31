@@ -6,13 +6,19 @@ actor WhisperKitTranscriber: Transcriber {
     let modelID: String
     private let model: TranscriptionModel
     private let language: TranscriptionLanguage
+    private let dictionary: CorrectionDictionaryStore?
     private var pipeline: WhisperKit?
 
-    init(model: TranscriptionModel, language: TranscriptionLanguage = .english) {
+    init(
+        model: TranscriptionModel,
+        language: TranscriptionLanguage = .english,
+        dictionary: CorrectionDictionaryStore? = nil
+    ) {
         self.modelID = model.id
         self.model = model
         // English-only checkpoints cannot perform language detection.
         self.language = model.languages.contains("multi") ? language : .english
+        self.dictionary = dictionary
     }
 
     /// Loads the model into memory; downloads first if not already on disk.
@@ -52,12 +58,35 @@ actor WhisperKitTranscriber: Transcriber {
         if pipeline == nil { try await warmUp() }
         guard let pipeline else { throw TranscriberError.notLoaded }
 
+        var options = Self.decodingOptions(for: language)
+        // WhisperKit 0.9's English-only CoreML decoder returns an empty result
+        // when promptTokens are prepended. Keep its deterministic correction
+        // pass, but only use prompt biasing with multilingual checkpoints.
+        if model.languages.contains("multi"),
+           language != .automatic,
+           let prompt = dictionary?.promptText(),
+           let tokenizer = pipeline.tokenizer {
+            options.promptTokens = tokenizer
+                .encode(text: " " + prompt)
+                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+            options.usePrefillPrompt = true
+            options.usePrefillCache = false
+            options.skipSpecialTokens = true
+            options.noSpeechThreshold = nil
+        }
+
         let results = try await pipeline.transcribe(
             audioArray: audio,
-            decodeOptions: Self.decodingOptions(for: language)
+            decodeOptions: options
         )
         let raw = results.map(\.text).joined(separator: " ")
-        return Self.sanitize(raw)
+        let sanitized = Self.sanitize(raw)
+        if sanitized.isEmpty, !raw.isEmpty {
+            FileHandle.standardError.write(Data(
+                "Whisper returned only non-speech tokens: \(raw)\n".utf8
+            ))
+        }
+        return sanitized
     }
 
     func detectLanguage(_ audio: [Float]) async throws -> LanguageDetection {
@@ -165,11 +194,13 @@ actor TranscriptionService {
     private var language: TranscriptionLanguage
     private var languageRequest = 0
     private let explicitModel: (any Transcriber)?
+    private let dictionary: CorrectionDictionaryStore
 
     init(
         model: TranscriptionModel,
         language: TranscriptionLanguage,
-        usesExplicitModel: Bool = false
+        usesExplicitModel: Bool = false,
+        dictionary: CorrectionDictionaryStore? = nil
     ) {
         guard let detectorModel = ModelRegistry.preferred(for: .automatic),
               let englishModel = ModelRegistry.preferred(for: .english),
@@ -177,18 +208,25 @@ actor TranscriptionService {
         else {
             preconditionFailure("Required automatic-routing models are not registered")
         }
+        let dictionary = dictionary ?? CorrectionDictionaryStore()
+        self.dictionary = dictionary
         self.detector = WhisperKitTranscriber(
             model: detectorModel,
             language: .automatic
         )
         self.english = WhisperKitTranscriber(
             model: englishModel,
-            language: .english
+            language: .english,
+            dictionary: dictionary
         )
-        self.german = WhisperCppTranscriber(model: germanModel)
+        self.german = WhisperCppTranscriber(model: germanModel, dictionary: dictionary)
         self.language = language
         self.explicitModel = usesExplicitModel
-            ? Self.makeTranscriber(model: model, language: language)
+            ? Self.makeTranscriber(
+                model: model,
+                language: language,
+                dictionary: dictionary
+            )
             : nil
     }
 
@@ -219,30 +257,33 @@ actor TranscriptionService {
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
+        let raw: String
         if let explicitModel {
-            return try await explicitModel.transcribe(audio)
-        }
-        switch language {
-        case .english:
-            return try await english.transcribe(audio)
-        case .german:
-            return try await german.transcribe(audio)
-        case .automatic:
-            let detection = try await detector.detectLanguage(audio)
-            let route = AutomaticLanguageRouter.route(detection)
-            let rawScore = detection.logProbabilities[detection.language] ?? -.infinity
-            FileHandle.standardError.write(Data(
-                "  detected \(detection.language) · logp \(rawScore) · route \(route)\n".utf8
-            ))
-            switch route {
+            raw = try await explicitModel.transcribe(audio)
+        } else {
+            switch language {
             case .english:
-                return try await english.transcribe(audio)
+                raw = try await english.transcribe(audio)
             case .german:
-                return try await german.transcribe(audio)
-            case .multilingualFallback:
-                return try await detector.transcribe(audio)
+                raw = try await german.transcribe(audio)
+            case .automatic:
+                let detection = try await detector.detectLanguage(audio)
+                let route = AutomaticLanguageRouter.route(detection)
+                let rawScore = detection.logProbabilities[detection.language] ?? -.infinity
+                FileHandle.standardError.write(Data(
+                    "  detected \(detection.language) · logp \(rawScore) · route \(route)\n".utf8
+                ))
+                switch route {
+                case .english:
+                    raw = try await english.transcribe(audio)
+                case .german:
+                    raw = try await german.transcribe(audio)
+                case .multilingualFallback:
+                    raw = try await detector.transcribe(audio)
+                }
             }
         }
+        return dictionary.apply(to: raw)
     }
 
     private func transcriber(for language: TranscriptionLanguage) -> any Transcriber {
@@ -255,13 +296,18 @@ actor TranscriptionService {
 
     private nonisolated static func makeTranscriber(
         model: TranscriptionModel,
-        language: TranscriptionLanguage
+        language: TranscriptionLanguage,
+        dictionary: CorrectionDictionaryStore
     ) -> any Transcriber {
         switch model.engine {
         case .whisperKit:
-            WhisperKitTranscriber(model: model, language: language)
+            WhisperKitTranscriber(
+                model: model,
+                language: language,
+                dictionary: dictionary
+            )
         case .whisperCpp:
-            WhisperCppTranscriber(model: model)
+            WhisperCppTranscriber(model: model, dictionary: dictionary)
         }
     }
 

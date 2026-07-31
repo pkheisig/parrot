@@ -7,22 +7,32 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     static let statusItemAutosaveName = AppIdentity.statusItemAutosaveName
 
     var onShortcutChanged: ((HotkeyShortcut) -> Void)?
+    var onLearningShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
     var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
 
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private let settings: DictationSettings
+    private let dictionary: CorrectionDictionaryStore
     private let contentController: SettingsViewController
+    private var dictionaryWindow: DictionaryWindowController?
 
-    init(modelID: String, settings: DictationSettings) {
+    init(
+        modelID: String,
+        settings: DictationSettings,
+        dictionary: CorrectionDictionaryStore
+    ) {
         self.settings = settings
+        self.dictionary = dictionary
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         self.contentController = SettingsViewController(
             modelID: modelID,
             shortcut: settings.shortcut,
+            learningShortcut: settings.learningShortcut,
             activationMode: settings.activationMode,
-            language: settings.transcriptionLanguage
+            language: settings.transcriptionLanguage,
+            dictionaryCount: dictionary.entries.count
         )
         super.init()
 
@@ -34,11 +44,16 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         statusItem.isVisible = true
 
         contentController.onShortcutChanged = { [weak self] shortcut in
-            self?.settings.shortcut = shortcut
-            self?.onShortcutChanged?(shortcut)
-            if let self {
-                self.contentController.setState(self.idleText)
+            guard let self else { return }
+            guard shortcut != self.settings.learningShortcut else {
+                self.contentController.setShortcut(self.settings.shortcut)
+                self.contentController.setState("dictation and learn hotkeys must differ")
+                NSSound.beep()
+                return
             }
+            self.settings.shortcut = shortcut
+            self.onShortcutChanged?(shortcut)
+            self.contentController.setState(self.idleText)
         }
         contentController.onActivationModeChanged = { [weak self] mode in
             self?.settings.activationMode = mode
@@ -50,13 +65,27 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         contentController.onLanguageChanged = { [weak self] language in
             self?.onLanguageChanged?(language)
         }
+        contentController.onLearningShortcutChanged = { [weak self] shortcut in
+            guard let self else { return }
+            guard shortcut != self.settings.shortcut else {
+                self.contentController.setLearningShortcut(self.settings.learningShortcut)
+                self.contentController.setState("dictation and learn hotkeys must differ")
+                NSSound.beep()
+                return
+            }
+            self.settings.learningShortcut = shortcut
+            self.onLearningShortcutChanged?(shortcut)
+        }
+        contentController.onOpenDictionary = { [weak self] in
+            self?.showDictionary()
+        }
         contentController.onQuit = {
             NSApp.terminate(nil)
         }
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 320, height: 322)
+        popover.contentSize = NSSize(width: 340, height: 382)
         popover.contentViewController = contentController
         popover.delegate = self
 
@@ -90,6 +119,40 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         contentController.setState(message)
     }
 
+    func setLearningStatus(_ message: String) {
+        contentController.setState(message)
+    }
+
+    @discardableResult
+    func confirmCorrections(_ proposals: [CorrectionProposal]) -> Int {
+        var learned = 0
+        NSApp.activate(ignoringOtherApps: true)
+        for proposal in proposals {
+            let fields = CorrectionFieldsView(
+                alias: proposal.alias,
+                canonical: proposal.canonical
+            )
+            let alert = NSAlert()
+            alert.messageText = "Learn correction?"
+            alert.informativeText = "The recognized text becomes an alias for your spelling."
+            alert.alertStyle = .informational
+            alert.accessoryView = fields
+            alert.addButton(withTitle: "Learn")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { break }
+            if dictionary.upsert(
+                alias: fields.aliasField.stringValue,
+                canonical: fields.canonicalField.stringValue
+            ) != nil {
+                learned += 1
+            } else {
+                NSSound.beep()
+            }
+        }
+        contentController.setDictionaryCount(dictionary.entries.count)
+        return learned
+    }
+
     func setLoading(_ language: TranscriptionLanguage) {
         contentController.setLanguageEnabled(false)
         contentController.setState("loading \(language.displayName.lowercased()) model…")
@@ -120,9 +183,20 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             contentController.setState(idleText)
+            contentController.setDictionaryCount(dictionary.entries.count)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    private func showDictionary() {
+        popover.performClose(nil)
+        if dictionaryWindow == nil {
+            dictionaryWindow = DictionaryWindowController(store: dictionary)
+        }
+        dictionaryWindow?.showWindow(nil)
+        dictionaryWindow?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private static let birdSVG = """
@@ -150,13 +224,17 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 @MainActor
 private final class SettingsViewController: NSViewController {
     var onShortcutChanged: ((HotkeyShortcut) -> Void)?
+    var onLearningShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
     var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
+    var onOpenDictionary: (() -> Void)?
     var onQuit: (() -> Void)?
 
     private let stateLabel = NSTextField(labelWithString: "")
     private let modelLabel = NSTextField(labelWithString: "")
     private let shortcutButton = ShortcutRecorderButton()
+    private let learningShortcutButton = ShortcutRecorderButton()
+    private let dictionaryButton = NSButton()
     private let modeControl = NSSegmentedControl(
         labels: ActivationMode.allCases.map(\.displayName),
         trackingMode: .selectOne,
@@ -171,8 +249,10 @@ private final class SettingsViewController: NSViewController {
     init(
         modelID: String,
         shortcut: HotkeyShortcut,
+        learningShortcut: HotkeyShortcut,
         activationMode: ActivationMode,
-        language: TranscriptionLanguage
+        language: TranscriptionLanguage,
+        dictionaryCount: Int
     ) {
         super.init(nibName: nil, bundle: nil)
 
@@ -193,11 +273,19 @@ private final class SettingsViewController: NSViewController {
             self?.onShortcutChanged?(shortcut)
         }
 
+        learningShortcutButton.shortcut = learningShortcut
+        learningShortcutButton.allowsModifierOnly = false
+        learningShortcutButton.toolTip = "After editing the last transcript, press this to learn the correction."
+        learningShortcutButton.onShortcutChanged = { [weak self] shortcut in
+            self?.onLearningShortcutChanged?(shortcut)
+        }
+
         modeControl.selectedSegment = ActivationMode.allCases.firstIndex(of: activationMode) ?? 0
         modeControl.target = self
         modeControl.action = #selector(modeChanged)
 
         let shortcutRow = Self.row(label: "Hotkey", control: shortcutButton)
+        let learningRow = Self.row(label: "Learn", control: learningShortcutButton)
         let modeRow = Self.row(label: "Behavior", control: modeControl)
 
         languagePopup.addItems(withTitles: TranscriptionLanguage.allCases.map(\.displayName))
@@ -205,6 +293,12 @@ private final class SettingsViewController: NSViewController {
         languagePopup.target = self
         languagePopup.action = #selector(languageChanged)
         let languageRow = Self.row(label: "Language", control: languagePopup)
+
+        dictionaryButton.bezelStyle = .rounded
+        dictionaryButton.target = self
+        dictionaryButton.action = #selector(openDictionary)
+        setDictionaryCount(dictionaryCount)
+        let dictionaryRow = Self.row(label: "Words", control: dictionaryButton)
 
         loginCheckbox.setButtonType(.switch)
         loginCheckbox.title = "Launch Parrot at login"
@@ -234,8 +328,8 @@ private final class SettingsViewController: NSViewController {
         quitButton.contentTintColor = .secondaryLabelColor
 
         let stack = NSStackView(views: [
-            title, stateLabel, modelLabel, shortcutRow, modeRow, languageRow, loginRow,
-            separator, quitButton,
+            title, stateLabel, modelLabel, shortcutRow, learningRow, modeRow,
+            languageRow, dictionaryRow, loginRow, separator, quitButton,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -259,8 +353,10 @@ private final class SettingsViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -12),
             shortcutRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            learningRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             modeRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             languageRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            dictionaryRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             loginRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             separator.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
@@ -288,6 +384,20 @@ private final class SettingsViewController: NSViewController {
         languagePopup.isEnabled = enabled
     }
 
+    func setShortcut(_ shortcut: HotkeyShortcut) {
+        shortcutButton.shortcut = shortcut
+    }
+
+    func setLearningShortcut(_ shortcut: HotkeyShortcut) {
+        learningShortcutButton.shortcut = shortcut
+    }
+
+    func setDictionaryCount(_ count: Int) {
+        dictionaryButton.title = count == 1
+            ? "Dictionary… (1 correction)"
+            : "Dictionary… (\(count) corrections)"
+    }
+
     private static func row(label: String, control: NSView) -> NSStackView {
         let labelView = NSTextField(labelWithString: label)
         labelView.font = .systemFont(ofSize: 12)
@@ -313,6 +423,10 @@ private final class SettingsViewController: NSViewController {
         let languages = TranscriptionLanguage.allCases
         guard languages.indices.contains(languagePopup.indexOfSelectedItem) else { return }
         onLanguageChanged?(languages[languagePopup.indexOfSelectedItem])
+    }
+
+    @objc private func openDictionary() {
+        onOpenDictionary?()
     }
 
     @objc private func loginSettingChanged() {
@@ -343,6 +457,7 @@ private final class SettingsViewController: NSViewController {
 @MainActor
 private final class ShortcutRecorderButton: NSButton {
     var onShortcutChanged: ((HotkeyShortcut) -> Void)?
+    var allowsModifierOnly = true
     var shortcut: HotkeyShortcut = .fn {
         didSet { title = shortcut.displayName }
     }
@@ -406,7 +521,8 @@ private final class ShortcutRecorderButton: NSButton {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        guard isRecordingShortcut,
+        guard allowsModifierOnly,
+              isRecordingShortcut,
               let flag = Self.flag(forModifierKeyCode: event.keyCode)
         else {
             super.flagsChanged(with: event)
@@ -471,5 +587,220 @@ private final class ShortcutRecorderButton: NSButton {
         case 63: .maskSecondaryFn
         default: nil
         }
+    }
+}
+
+@MainActor
+private final class CorrectionFieldsView: NSView {
+    let aliasField = NSTextField()
+    let canonicalField = NSTextField()
+
+    init(alias: String, canonical: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 420, height: 72))
+        aliasField.stringValue = alias
+        canonicalField.stringValue = canonical
+        aliasField.placeholderString = "What Parrot recognized"
+        canonicalField.placeholderString = "Correct spelling"
+
+        let aliasRow = Self.row(label: "Recognized", field: aliasField)
+        let canonicalRow = Self.row(label: "Replace with", field: canonicalField)
+        let stack = NSStackView(views: [aliasRow, canonicalRow])
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            aliasRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            canonicalRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private static func row(label: String, field: NSTextField) -> NSStackView {
+        let labelView = NSTextField(labelWithString: label)
+        labelView.textColor = .secondaryLabelColor
+        labelView.font = .systemFont(ofSize: 11)
+        labelView.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        let row = NSStackView(views: [labelView, field])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        return row
+    }
+}
+
+@MainActor
+private final class DictionaryWindowController:
+    NSWindowController,
+    NSTableViewDataSource,
+    NSTableViewDelegate,
+    NSTextFieldDelegate
+{
+    private let store: CorrectionDictionaryStore
+    private let tableView = NSTableView()
+    private var rows: [CorrectionEntry] = []
+    private var observer: NSObjectProtocol?
+
+    init(store: CorrectionDictionaryStore) {
+        self.store = store
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 340),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Parrot Dictionary"
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+
+        let title = NSTextField(labelWithString: "Universal correction dictionary")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        let detail = NSTextField(
+            wrappingLabelWithString:
+                "Applied after English or German recognition. Double-click a cell to edit."
+        )
+        detail.textColor = .secondaryLabelColor
+        detail.font = .systemFont(ofSize: 11)
+
+        let aliasColumn = NSTableColumn(identifier: .init("alias"))
+        aliasColumn.title = "Recognized"
+        aliasColumn.minWidth = 180
+        let canonicalColumn = NSTableColumn(identifier: .init("canonical"))
+        canonicalColumn.title = "Replace with"
+        canonicalColumn.minWidth = 180
+        tableView.addTableColumn(aliasColumn)
+        tableView.addTableColumn(canonicalColumn)
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.allowsMultipleSelection = true
+        tableView.usesAlternatingRowBackgroundColors = true
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+
+        let addButton = NSButton(title: "Add…", target: self, action: #selector(addEntry))
+        let removeButton = NSButton(
+            title: "Remove",
+            target: self,
+            action: #selector(removeSelected)
+        )
+        let buttonRow = NSStackView(views: [addButton, removeButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+
+        let stack = NSStackView(views: [title, detail, scrollView, buttonRow])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.setCustomSpacing(2, after: title)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView?.addSubview(stack)
+        if let contentView = window.contentView {
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+                stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+                stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
+                stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
+                scrollView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 190),
+            ])
+        }
+
+        reload()
+        observer = NotificationCenter.default.addObserver(
+            forName: .parrotDictionaryDidChange,
+            object: store,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reload() }
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        rows.count
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard rows.indices.contains(row), let tableColumn else { return nil }
+        let entry = rows[row]
+        let field = NSTextField()
+        field.isBordered = false
+        field.backgroundColor = .clear
+        field.isEditable = true
+        field.delegate = self
+        field.identifier = NSUserInterfaceItemIdentifier(
+            "\(tableColumn.identifier.rawValue)|\(entry.id.uuidString)"
+        )
+        field.stringValue = tableColumn.identifier.rawValue == "alias"
+            ? entry.alias
+            : entry.canonical
+        return field
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField,
+              let identifier = field.identifier?.rawValue.split(separator: "|"),
+              identifier.count == 2,
+              let id = UUID(uuidString: String(identifier[1])),
+              let entry = rows.first(where: { $0.id == id })
+        else { return }
+        let alias = identifier[0] == "alias" ? field.stringValue : entry.alias
+        let canonical = identifier[0] == "canonical" ? field.stringValue : entry.canonical
+        if !store.update(id: id, alias: alias, canonical: canonical) {
+            NSSound.beep()
+            reload()
+        }
+    }
+
+    @objc private func addEntry() {
+        let fields = CorrectionFieldsView(alias: "", canonical: "")
+        let alert = NSAlert()
+        alert.messageText = "Add correction"
+        alert.accessoryView = fields
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if store.upsert(
+            alias: fields.aliasField.stringValue,
+            canonical: fields.canonicalField.stringValue
+        ) == nil {
+            NSSound.beep()
+        }
+    }
+
+    @objc private func removeSelected() {
+        let ids = tableView.selectedRowIndexes.compactMap {
+            rows.indices.contains($0) ? rows[$0].id : nil
+        }
+        for id in ids {
+            store.remove(id: id)
+        }
+    }
+
+    private func reload() {
+        rows = store.entries
+        tableView.reloadData()
     }
 }

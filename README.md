@@ -38,6 +38,26 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
 
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
 
+## Learn names and specialist vocabulary
+
+Parrot has one universal correction dictionary shared by English, German, and
+Automatic mode. To teach a spelling:
+
+1. Dictate normally and let Parrot insert the transcript.
+2. Correct the misspelled word or phrase in place.
+3. Press **Control–Option–L** (configurable as **Learn** in the menu-bar settings).
+4. Confirm the extracted `recognized → corrected` mapping.
+
+For example, changing `spectra easy` to `Spectreasy` teaches Parrot to replace
+that recognition next time. Learned aliases are applied deterministically to
+both English and German output; compatible specialist engines also receive the
+canonical spellings as prompt vocabulary. The dictionary is never supplied to
+the automatic language detector.
+
+Open **Dictionary…** in the menu-bar settings to add, edit, or remove mappings.
+Entries are stored locally at
+`~/Library/Application Support/Parrot/Dictionary/corrections.json`.
+
 The **Language** setting supports English, German, or Automatic recognition.
 Automatic first uses the stronger 488 MB multilingual Whisper Small model to detect the
 language. Confident English is then transcribed with the English-specific

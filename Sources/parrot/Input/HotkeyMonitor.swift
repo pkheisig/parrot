@@ -7,26 +7,36 @@ import Foundation
 /// Requires Accessibility permission. If the tap fails to register, callers
 /// will see an error from `start()`.
 final class HotkeyMonitor {
-    enum Event { case pressed, released, cancelRequested }
+    enum Event { case pressed, released, cancelRequested, learnCorrectionRequested }
     enum HotkeyError: Error { case tapCreateFailed }
 
     static let escapeKeyCode: CGKeyCode = 53
 
     private var shortcut: HotkeyShortcut
+    private var learningShortcut: HotkeyShortcut
     private let debug: Bool
     private var onEvent: ((Event) -> Void)?
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
 
-    init(shortcut: HotkeyShortcut = .fn, debug: Bool = false) {
+    init(
+        shortcut: HotkeyShortcut = .fn,
+        learningShortcut: HotkeyShortcut = .learnCorrection,
+        debug: Bool = false
+    ) {
         self.shortcut = shortcut
+        self.learningShortcut = learningShortcut
         self.debug = debug
     }
 
     func setShortcut(_ shortcut: HotkeyShortcut) {
         self.shortcut = shortcut
         isPressed = false
+    }
+
+    func setLearningShortcut(_ shortcut: HotkeyShortcut) {
+        learningShortcut = shortcut
     }
 
     func start(onEvent: @escaping (Event) -> Void) throws {
@@ -102,9 +112,21 @@ final class HotkeyMonitor {
             return
         }
 
+        if Self.isLearningEvent(
+            type: type,
+            keyCode: keyCode,
+            flags: event.flags,
+            isRepeat: isRepeat,
+            shortcut: learningShortcut
+        ) {
+            onEvent?(.learnCorrectionRequested)
+            return
+        }
+
         if shortcut.isModifierOnly {
             guard type == .flagsChanged, keyCode == shortcut.keyCode else { return }
-            let pressed = event.flags.contains(shortcut.modifiers)
+            let pressed = event.flags.intersection(Self.supportedModifiers)
+                == shortcut.modifiers
             guard pressed != isPressed else { return }
             isPressed = pressed
             onEvent?(pressed ? .pressed : .released)
@@ -135,6 +157,20 @@ final class HotkeyMonitor {
         isRepeat: Bool
     ) -> Bool {
         type == .keyDown && keyCode == escapeKeyCode && !isRepeat
+    }
+
+    static func isLearningEvent(
+        type: CGEventType,
+        keyCode: CGKeyCode,
+        flags: CGEventFlags,
+        isRepeat: Bool,
+        shortcut: HotkeyShortcut
+    ) -> Bool {
+        !shortcut.isModifierOnly
+            && type == .keyDown
+            && !isRepeat
+            && keyCode == shortcut.keyCode
+            && flags.intersection(supportedModifiers) == shortcut.modifiers
     }
 
     private static let supportedModifiers: CGEventFlags = [

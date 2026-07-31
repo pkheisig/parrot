@@ -1,0 +1,89 @@
+import Foundation
+import XCTest
+@testable import parrot
+
+final class CorrectionDictionaryTests: XCTestCase {
+    func testAppliesUniversalCorrectionsAtBoundariesAndLongestFirst() {
+        let store = CorrectionDictionaryStore(persistent: false)
+        XCTAssertNotNil(store.upsert(alias: "spectra", canonical: "Spectra"))
+        XCTAssertNotNil(store.upsert(alias: "spectra easy", canonical: "Spectreasy"))
+        XCTAssertNotNil(store.upsert(alias: "O M I P", canonical: "OMIP"))
+
+        XCTAssertEqual(
+            store.apply(to: "Use SPECTRA EASY with O M I P."),
+            "Use Spectreasy with OMIP."
+        )
+        XCTAssertEqual(
+            store.apply(to: "The spectra easygoing example is unrelated."),
+            "The Spectra easygoing example is unrelated."
+        )
+    }
+
+    func testUpsertKeepsOneMappingPerAliasAndBuildsDeduplicatedPrompt() {
+        let store = CorrectionDictionaryStore(persistent: false)
+        store.upsert(alias: "spectra easy", canonical: "Spectreasy")
+        store.upsert(alias: "spectr easy", canonical: "Spectreasy")
+        store.upsert(alias: "SPECTRA EASY", canonical: "Spectreasy 2")
+
+        XCTAssertEqual(store.entries.count, 2)
+        XCTAssertEqual(
+            store.apply(to: "spectra easy and spectr easy"),
+            "Spectreasy 2 and Spectreasy"
+        )
+        let prompt = store.promptText()
+        XCTAssertTrue(prompt?.contains("Spectreasy 2") == true)
+        XCTAssertTrue(prompt?.contains("Spectreasy") == true)
+    }
+
+    func testPersistsAndReloadsEntries() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("parrot-dictionary-\(UUID().uuidString)")
+        let file = directory.appendingPathComponent("corrections.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writer = CorrectionDictionaryStore(fileURL: file)
+        writer.upsert(alias: "oh mip", canonical: "OMIP")
+
+        let reader = CorrectionDictionaryStore(fileURL: file)
+        XCTAssertEqual(reader.entries.count, 1)
+        XCTAssertEqual(reader.entries.first?.alias, "oh mip")
+        XCTAssertEqual(reader.entries.first?.canonical, "OMIP")
+    }
+
+    func testExtractsOneOrMultipleWordLevelCorrections() {
+        XCTAssertEqual(
+            CorrectionDiff.proposals(
+                original: "This uses spectra easy today.",
+                corrected: "This uses Spectreasy today."
+            ),
+            [CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy")]
+        )
+        XCTAssertEqual(
+            CorrectionDiff.proposals(
+                original: "Use spectra easy with O M I P today.",
+                corrected: "Use Spectreasy with OMIP today."
+            ),
+            [
+                CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy"),
+                CorrectionProposal(alias: "O M I P", canonical: "OMIP"),
+            ]
+        )
+    }
+
+    func testFindsLikelyOriginalAliasForSelectedCorrection() {
+        XCTAssertEqual(
+            CorrectionDiff.bestAlias(
+                in: "We analyzed it in spectra easy yesterday",
+                for: "Spectreasy"
+            ),
+            "spectra easy"
+        )
+        XCTAssertEqual(
+            CorrectionDiff.bestAlias(
+                in: "This is the O M I P panel",
+                for: "OMIP"
+            ),
+            "O M I P"
+        )
+    }
+}
