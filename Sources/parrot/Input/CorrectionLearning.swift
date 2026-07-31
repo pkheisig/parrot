@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -55,8 +56,10 @@ final class CorrectionLearningController {
             throw CorrectionLearningError.expired
         }
 
+        var readEditableText = false
         let corrected = session.snapshot?.correctedInsertedText()
         if let corrected {
+            readEditableText = true
             let proposals = CorrectionDiff.proposals(
                 original: session.insertedText,
                 corrected: corrected
@@ -64,14 +67,43 @@ final class CorrectionLearningController {
             if !proposals.isEmpty { return proposals }
         }
 
-        if let selected = FocusedTextSnapshot.selectedText(),
-           let alias = CorrectionDiff.bestAlias(
-               in: session.insertedText,
-               for: selected
-           ) {
-            return [CorrectionProposal(alias: alias, canonical: selected)]
+        if let selected = FocusedTextSnapshot.selectedText() {
+            readEditableText = true
+            if let proposals = CorrectionDiff.proposalsFromSelection(
+                original: session.insertedText,
+                selected: selected
+            ) {
+                return proposals
+            }
         }
-        if corrected != nil {
+
+        // Custom web and Electron editors frequently hide their value and
+        // selection from AX. Their native Copy command is considerably more
+        // interoperable, so use it without permanently changing the clipboard.
+        if let selected = ClipboardTextCapture.selectedText() {
+            readEditableText = true
+            if let proposals = CorrectionDiff.proposalsFromSelection(
+                original: session.insertedText,
+                selected: selected
+            ) {
+                return proposals
+            }
+        }
+
+        if let fieldText = ClipboardTextCapture.wholeFocusedEditorText() {
+            readEditableText = true
+            if let correctedTranscript = CorrectionDiff.bestCorrectedTranscript(
+                in: fieldText,
+                for: session.insertedText
+            ) {
+                let proposals = CorrectionDiff.proposals(
+                    original: session.insertedText,
+                    corrected: correctedTranscript
+                )
+                if !proposals.isEmpty { return proposals }
+            }
+        }
+        if readEditableText {
             throw CorrectionLearningError.noChanges
         }
         throw CorrectionLearningError.focusChanged
@@ -322,8 +354,64 @@ enum CorrectionDiff {
         return best.value
     }
 
+    static func proposalsFromSelection(
+        original: String,
+        selected: String
+    ) -> [CorrectionProposal]? {
+        let originalCount = tokens(in: original).count
+        let selectedCount = tokens(in: selected).count
+        guard originalCount > 0, selectedCount > 0 else { return nil }
+
+        // A selection covering most of the transcript is treated as the edited
+        // transcript. A short selection is treated as only the corrected term.
+        if selectedCount >= max(2, originalCount / 2) {
+            let proposals = proposals(original: original, corrected: selected)
+            if !proposals.isEmpty { return proposals }
+        }
+        guard let alias = bestAlias(in: original, for: selected) else { return nil }
+        return [CorrectionProposal(alias: alias, canonical: selected)]
+    }
+
+    static func bestCorrectedTranscript(
+        in fieldText: String,
+        for original: String
+    ) -> String? {
+        let source = tokens(in: fieldText)
+        let target = tokens(in: original)
+        guard !source.isEmpty,
+              !target.isEmpty,
+              source.count <= 5_000,
+              target.count <= 300
+        else { return nil }
+
+        let targetKey = compactKey(target.joined(separator: " "))
+        let minimumSize = max(1, target.count - min(8, target.count - 1))
+        let maximumSize = min(source.count, target.count + 8)
+        var best: (value: String, score: Double)?
+
+        for size in minimumSize...maximumSize {
+            guard size <= source.count else { continue }
+            for start in 0...(source.count - size) {
+                let value = source[start..<(start + size)].joined(separator: " ")
+                let key = compactKey(value)
+                let distance = levenshtein(key, targetKey)
+                let score = Double(distance)
+                    / Double(max(max(key.count, targetKey.count), 1))
+                    + Double(abs(size - target.count)) * 0.015
+                if best == nil || score < best!.score {
+                    best = (value, score)
+                }
+            }
+        }
+        guard let best, best.score <= 0.45 else { return nil }
+        return best.value
+    }
+
     private static func tokens(in text: String) -> [String] {
-        let pattern = #"[\p{L}\p{N}][\p{L}\p{N}+.#/_'’\-]*"#
+        // Keep punctuation used inside technical terms (C++, node.js, A/B)
+        // while excluding sentence-ending periods from learned aliases.
+        let pattern =
+            #"[\p{L}\p{N}](?:[\p{L}\p{N}+.#/_'’\-]*[\p{L}\p{N}+#/_'’\-])?"#
         guard let expression = try? NSRegularExpression(pattern: pattern) else {
             return []
         }
@@ -353,5 +441,95 @@ enum CorrectionDiff {
             previous = current
         }
         return previous[b.count]
+    }
+}
+
+/// Reads custom editors through their standard Copy command while preserving
+/// the user's clipboard. This avoids depending on app-specific AX text APIs.
+private enum ClipboardTextCapture {
+    static func selectedText() -> String? {
+        capture(selectAll: false)
+    }
+
+    static func wholeFocusedEditorText() -> String? {
+        capture(selectAll: true)
+    }
+
+    private static func capture(selectAll: Bool) -> String? {
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
+        defer { snapshot.restore(to: pasteboard) }
+
+        pasteboard.clearContents()
+        let sentinel = "parrot-copy-sentinel-\(UUID().uuidString)"
+        guard pasteboard.setString(sentinel, forType: .string) else { return nil }
+        let sentinelChangeCount = pasteboard.changeCount
+
+        if selectAll {
+            postKey(0, modifiers: .maskCommand) // Command-A
+            Thread.sleep(forTimeInterval: 0.04)
+        }
+        postKey(8, modifiers: .maskCommand) // Command-C
+
+        let deadline = Date().addingTimeInterval(0.35)
+        while pasteboard.changeCount == sentinelChangeCount, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        let copied = pasteboard.string(forType: .string)
+        if selectAll {
+            // Do not leave the user's editor with all content selected.
+            postKey(124, modifiers: []) // Right Arrow, collapse at the end.
+            Thread.sleep(forTimeInterval: 0.03)
+        }
+        guard let copied,
+              copied != sentinel,
+              !copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              copied.count <= 100_000
+        else { return nil }
+        return copied
+    }
+
+    private static func postKey(_ keyCode: CGKeyCode, modifiers: CGEventFlags) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: keyCode,
+            keyDown: true
+        )
+        down?.flags = modifiers
+        down?.post(tap: .cgSessionEventTap)
+        let up = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: keyCode,
+            keyDown: false
+        )
+        up?.flags = modifiers
+        up?.post(tap: .cgSessionEventTap)
+    }
+}
+
+private struct PasteboardSnapshot {
+    private let items: [[NSPasteboard.PasteboardType: Data]]
+
+    init(pasteboard: NSPasteboard) {
+        items = (pasteboard.pasteboardItems ?? []).map { item in
+            Dictionary(uniqueKeysWithValues: item.types.compactMap { type in
+                item.data(forType: type).map { (type, $0) }
+            })
+        }
+    }
+
+    func restore(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        guard !items.isEmpty else { return }
+        let restored = items.map { values in
+            let item = NSPasteboardItem()
+            for (type, data) in values {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+        pasteboard.writeObjects(restored)
     }
 }

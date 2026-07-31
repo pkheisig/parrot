@@ -121,6 +121,10 @@ element, insertion range, and short surrounding anchors. Pressing the Learn
 hotkey within five minutes extracts the edited span, computes word-level
 replacement hunks, and asks for confirmation. Selecting the corrected phrase
 provides a fallback when an application does not expose its complete text value.
+For custom web and Electron editors that hide both values from Accessibility,
+Parrot temporarily invokes Copy on the selection or whole focused editor,
+restores the clipboard, and fuzzy-aligns the edited field with the last
+transcript.
 
 ### `CorrectionDictionaryStore`
 

@@ -86,4 +86,36 @@ final class CorrectionDictionaryTests: XCTestCase {
             "O M I P"
         )
     }
+
+    func testExtractsCorrectionFromShortOrWholeSelection() {
+        XCTAssertEqual(
+            CorrectionDiff.proposalsFromSelection(
+                original: "My package is called spectra easy.",
+                selected: "Spectreasy"
+            ),
+            [CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy")]
+        )
+        XCTAssertEqual(
+            CorrectionDiff.proposalsFromSelection(
+                original: "My package is called spectra easy.",
+                selected: "My package is called Spectreasy."
+            ),
+            [CorrectionProposal(alias: "spectra easy", canonical: "Spectreasy")]
+        )
+    }
+
+    func testFindsEditedTranscriptInsideLargerFocusedEditor() {
+        let field = """
+        Earlier unrelated text.
+        My package is called Spectreasy.
+        Some following text.
+        """
+        XCTAssertEqual(
+            CorrectionDiff.bestCorrectedTranscript(
+                in: field,
+                for: "My package is called spectra easy."
+            ),
+            "My package is called Spectreasy"
+        )
+    }
 }
