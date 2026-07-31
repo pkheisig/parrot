@@ -208,7 +208,13 @@ struct FocusedTextSnapshot {
             &raw
         ) == .success
         else { return nil }
-        return raw as? String
+        if let string = raw as? String {
+            return string
+        }
+        if let attributed = raw as? NSAttributedString {
+            return attributed.string
+        }
+        return nil
     }
 
     private static func selectedRange(of element: AXUIElement) -> CFRange? {

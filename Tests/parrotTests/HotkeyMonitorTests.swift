@@ -70,4 +70,32 @@ final class HotkeyMonitorTests: XCTestCase {
             )
         )
     }
+
+    func testLearningShortcutIsConsumedThroughKeyUp() throws {
+        let shortcut = HotkeyShortcut(
+            keyCode: 37,
+            modifiersRawValue: CGEventFlags.maskCommand.rawValue,
+            isModifierOnly: false
+        )
+        let monitor = HotkeyMonitor(learningShortcut: shortcut)
+        let down = try XCTUnwrap(
+            CGEvent(keyboardEventSource: nil, virtualKey: 37, keyDown: true)
+        )
+        down.flags = .maskCommand
+        XCTAssertTrue(monitor.interceptLearning(type: .keyDown, event: down))
+
+        let up = try XCTUnwrap(
+            CGEvent(keyboardEventSource: nil, virtualKey: 37, keyDown: false)
+        )
+        up.flags = .maskCommand
+        XCTAssertTrue(monitor.interceptLearning(type: .keyUp, event: up))
+
+        let wrongModifiers = try XCTUnwrap(
+            CGEvent(keyboardEventSource: nil, virtualKey: 37, keyDown: true)
+        )
+        wrongModifiers.flags = [.maskCommand, .maskShift]
+        XCTAssertFalse(
+            monitor.interceptLearning(type: .keyDown, event: wrongModifiers)
+        )
+    }
 }

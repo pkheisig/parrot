@@ -201,9 +201,12 @@ struct Run: ParsableCommand {
                     menuBar?.setRecording(false)
                 }
             case .learnCorrectionRequested:
+                NSLog("Parrot Learn hotkey received")
                 guard !isRecording else {
                     MainActor.assumeIsolated {
-                        menuBar?.setLearningStatus("finish or cancel recording before learning")
+                        menuBar?.showLearningError(
+                            "Finish or cancel the recording before learning a correction."
+                        )
                     }
                     return
                 }
@@ -220,7 +223,11 @@ struct Run: ParsableCommand {
                             )
                         }
                     } catch {
-                        menuBar?.setLearningStatus(error.localizedDescription)
+                        menuBar?.showLearningError(error.localizedDescription)
+                        NSLog(
+                            "Parrot correction learning failed: %@",
+                            error.localizedDescription
+                        )
                         FileHandle.standardError.write(Data(
                             "learn correction failed: \(error.localizedDescription)\n".utf8
                         ))

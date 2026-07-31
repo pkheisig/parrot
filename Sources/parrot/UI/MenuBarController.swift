@@ -123,6 +123,17 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         contentController.setState(message)
     }
 
+    func showLearningError(_ message: String) {
+        contentController.setState(message)
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t learn correction"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     @discardableResult
     func confirmCorrections(_ proposals: [CorrectionProposal]) -> Int {
         var learned = 0

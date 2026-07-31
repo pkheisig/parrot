@@ -19,6 +19,7 @@ final class HotkeyMonitor {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
+    private var isLearningPressed = false
 
     init(
         shortcut: HotkeyShortcut = .fn,
@@ -37,6 +38,7 @@ final class HotkeyMonitor {
 
     func setLearningShortcut(_ shortcut: HotkeyShortcut) {
         learningShortcut = shortcut
+        isLearningPressed = false
     }
 
     func start(onEvent: @escaping (Event) -> Void) throws {
@@ -63,7 +65,7 @@ final class HotkeyMonitor {
             let tap = CGEvent.tapCreate(
                 tap: .cgSessionEventTap,
                 place: .headInsertEventTap,
-                options: .listenOnly,
+                options: .defaultTap,
                 eventsOfInterest: mask,
                 callback: hotkeyCallback,
                 userInfo: userInfo
@@ -90,6 +92,44 @@ final class HotkeyMonitor {
         tap = nil
         runLoopSource = nil
         onEvent = nil
+        isLearningPressed = false
+    }
+
+    /// Consume the Learn shortcut before the foreground application receives
+    /// it. This matters for shortcuts such as Command-L, which would otherwise
+    /// move focus away from the corrected text before Parrot can inspect it.
+    func interceptLearning(type: CGEventType, event: CGEvent) -> Bool {
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+
+        if type == .keyDown,
+           keyCode == learningShortcut.keyCode,
+           event.flags.intersection(Self.supportedModifiers) == learningShortcut.modifiers,
+           !learningShortcut.isModifierOnly {
+            let shouldEmit = !isRepeat && !isLearningPressed
+            isLearningPressed = true
+            if shouldEmit {
+                let callback = onEvent
+                DispatchQueue.main.async {
+                    callback?(.learnCorrectionRequested)
+                }
+            }
+            return true
+        }
+
+        if type == .keyUp,
+           keyCode == learningShortcut.keyCode,
+           isLearningPressed {
+            isLearningPressed = false
+            return true
+        }
+        return false
+    }
+
+    fileprivate func reenableTap() {
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
     }
 
     fileprivate func handle(type: CGEventType, event: CGEvent) {
@@ -109,17 +149,6 @@ final class HotkeyMonitor {
         // dictation shortcut. Only emit on the initial key-down edge.
         if Self.isCancelEvent(type: type, keyCode: keyCode, isRepeat: isRepeat) {
             onEvent?(.cancelRequested)
-            return
-        }
-
-        if Self.isLearningEvent(
-            type: type,
-            keyCode: keyCode,
-            flags: event.flags,
-            isRepeat: isRepeat,
-            shortcut: learningShortcut
-        ) {
-            onEvent?(.learnCorrectionRequested)
             return
         }
 
@@ -188,9 +217,12 @@ private func hotkeyCallback(
     let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
 
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        // System disabled our tap; we'll need to re-enable. For now just no-op
-        // and let the user restart parrot.
+        monitor.reenableTap()
         return Unmanaged.passUnretained(event)
+    }
+
+    if monitor.interceptLearning(type: type, event: event) {
+        return nil
     }
 
     let copy = event.copy()
