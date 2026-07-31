@@ -39,11 +39,11 @@ final class DictationSettingsTests: XCTestCase {
         )
         XCTAssertEqual(
             ModelRegistry.preferred(for: .german)?.id,
-            "whisper-base"
+            "whisper-large-v3-turbo-german-q5"
         )
         XCTAssertEqual(
             ModelRegistry.preferred(for: .automatic)?.id,
-            "whisper-base"
+            "whisper-small"
         )
 
         let automatic = WhisperKitTranscriber.decodingOptions(for: .automatic)
@@ -53,6 +53,64 @@ final class DictationSettingsTests: XCTestCase {
         let german = WhisperKitTranscriber.decodingOptions(for: .german)
         XCTAssertFalse(german.detectLanguage)
         XCTAssertEqual(german.language, "de")
+    }
+
+    func testAutomaticLanguageRoutesOnlyConfidentEnglishAndGerman() {
+        XCTAssertEqual(
+            AutomaticLanguageRouter.route(
+                LanguageDetection(
+                    language: "en",
+                    logProbabilities: ["en": log(0.92), "de": log(0.04)]
+                )
+            ),
+            .english
+        )
+        XCTAssertEqual(
+            AutomaticLanguageRouter.route(
+                LanguageDetection(
+                    language: "de",
+                    logProbabilities: ["en": log(0.03), "de": log(0.94)]
+                )
+            ),
+            .german
+        )
+        XCTAssertEqual(
+            AutomaticLanguageRouter.route(
+                LanguageDetection(
+                    language: "en",
+                    logProbabilities: ["en": log(0.40), "de": log(0.35)]
+                )
+            ),
+            .german
+        )
+        XCTAssertEqual(
+            AutomaticLanguageRouter.route(
+                LanguageDetection(
+                    language: "fr",
+                    logProbabilities: [
+                        "en": log(0.04), "de": log(0.03), "fr": log(0.90),
+                    ]
+                )
+            ),
+            .multilingualFallback
+        )
+    }
+
+    func testGermanSpecialistHasPinnedDownloadMetadata() {
+        let german = ModelRegistry.preferred(for: .german)
+        XCTAssertEqual(german?.engine, .whisperCpp)
+        XCTAssertEqual(german?.languages, ["de"])
+        XCTAssertEqual(
+            german?.sha256,
+            "15e92e3db0993c52fffa781513eec9253475331c1be808f8fb409285c9d9d030"
+        )
+        XCTAssertNotNil(german?.downloadURL)
+    }
+
+    func testAppAndStatusItemUseIndependentStableIdentity() {
+        XCTAssertEqual(AppIdentity.bundleIdentifier, "com.pkheisig.parrot")
+        XCTAssertFalse(AppIdentity.statusItemAutosaveName.contains("codex"))
+        XCTAssertTrue(AppIdentity.statusItemAutosaveName.hasPrefix(AppIdentity.bundleIdentifier))
     }
 
     func testNamesLeftAndRightModifierShortcuts() {

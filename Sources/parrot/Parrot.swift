@@ -9,7 +9,10 @@ struct Parrot: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "parrot",
         abstract: "Minimal macOS dictation daemon with a configurable global hotkey.",
-        subcommands: [Run.self, Setup.self, Doctor.self, Models.self, Install.self],
+        subcommands: [
+            Run.self, Setup.self, Doctor.self, Models.self, Install.self,
+            TranscribeFile.self,
+        ],
         defaultSubcommand: Run.self
     )
 }
@@ -66,8 +69,12 @@ struct Run: ParsableCommand {
 
         let transcriptionService = TranscriptionService(
             model: chosenModel,
-            language: settings.transcriptionLanguage
+            language: settings.transcriptionLanguage,
+            usesExplicitModel: model != nil
         )
+        let readyModelID = settings.transcriptionLanguage == .automatic
+            ? "automatic · English/German specialists"
+            : chosenModel.id
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -79,8 +86,13 @@ struct Run: ParsableCommand {
         if let overlay {
             capture.onLevel = { level in overlay.pushLevel(level) }
         }
-        let menuBar = MainActor.assumeIsolated {
-            MenuBarController(modelID: chosenModel.id, settings: settings)
+        // The standalone CLI remains headless. Only the signed .app owns a
+        // status item, avoiding the duplicate "parrot" identity macOS creates
+        // for /usr/local/bin/parrot.
+        let menuBar: MenuBarController? = MainActor.assumeIsolated {
+            isAppBundle
+                ? MenuBarController(modelID: chosenModel.id, settings: settings)
+                : nil
         }
         var activationMode = settings.activationMode
         var recordingMode = activationMode
@@ -89,27 +101,27 @@ struct Run: ParsableCommand {
             RuntimeReadiness(modelReady: !isAppBundle)
         }
         MainActor.assumeIsolated {
-            menuBar.onShortcutChanged = { shortcut in
+            menuBar?.onShortcutChanged = { shortcut in
                 monitor.setShortcut(shortcut)
             }
-            menuBar.onActivationModeChanged = { mode in
+            menuBar?.onActivationModeChanged = { mode in
                 activationMode = mode
             }
-            menuBar.onLanguageChanged = { language in
-                menuBar.setLoading(language)
+            menuBar?.onLanguageChanged = { language in
+                menuBar?.setLoading(language)
                 Task {
                     do {
                         guard let modelID = try await transcriptionService.setLanguage(language)
                         else { return }
                         await MainActor.run {
-                            menuBar.setReady(modelID: modelID, language: language)
+                            menuBar?.setReady(modelID: modelID, language: language)
                         }
                     } catch {
                         FileHandle.standardError.write(Data(
                             "language model load failed: \(error)\n".utf8
                         ))
                         await MainActor.run {
-                            menuBar.setLanguageError("model load failed · try again")
+                            menuBar?.setLanguageError("model load failed · try again")
                         }
                     }
                 }
@@ -121,7 +133,7 @@ struct Run: ParsableCommand {
             case .pressed:
                 guard MainActor.assumeIsolated({ readiness.modelReady }) else {
                     MainActor.assumeIsolated {
-                        menuBar.setUnavailable("model is still loading…")
+                        menuBar?.setUnavailable("model is still loading…")
                     }
                     return
                 }
@@ -145,7 +157,7 @@ struct Run: ParsableCommand {
                     FileHandle.standardError.write(Data("● recording\n".utf8))
                     MainActor.assumeIsolated {
                         overlay?.show(.recording)
-                        menuBar.setRecording(true)
+                        menuBar?.setRecording(true)
                     }
                 } catch {
                     FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
@@ -168,14 +180,14 @@ struct Run: ParsableCommand {
                 FileHandle.standardError.write(Data("recording canceled\n".utf8))
                 MainActor.assumeIsolated {
                     overlay?.hide()
-                    menuBar.setRecording(false)
+                    menuBar?.setRecording(false)
                 }
             }
         }
 
         if isAppBundle {
             MainActor.assumeIsolated {
-                menuBar.setLoading(settings.transcriptionLanguage)
+                menuBar?.setLoading(settings.transcriptionLanguage)
             }
 
             do {
@@ -188,7 +200,7 @@ struct Run: ParsableCommand {
                     "failed to register hotkey tap: \(error)\n".utf8
                 ))
                 MainActor.assumeIsolated {
-                    menuBar.setUnavailable(
+                    menuBar?.setUnavailable(
                         "Accessibility required · enable Parrot; it will reconnect"
                     )
                     _ = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { timer in
@@ -199,12 +211,12 @@ struct Run: ParsableCommand {
                                 readiness.monitorStarted = true
                                 timer.invalidate()
                                 if readiness.modelReady {
-                                    menuBar.setReady(
-                                        modelID: chosenModel.id,
+                                    menuBar?.setReady(
+                                        modelID: readyModelID,
                                         language: settings.transcriptionLanguage
                                     )
                                 } else {
-                                    menuBar.setLoading(settings.transcriptionLanguage)
+                                    menuBar?.setLoading(settings.transcriptionLanguage)
                                 }
                             } catch {
                                 // Permission propagation can lag briefly after
@@ -221,15 +233,15 @@ struct Run: ParsableCommand {
                 } catch {
                     FileHandle.standardError.write(Data("warmup failed: \(error)\n".utf8))
                     await MainActor.run {
-                        menuBar.setLanguageError("model load failed · check your connection")
+                        menuBar?.setLanguageError("model load failed · check your connection")
                     }
                     return
                 }
                 await MainActor.run {
                     readiness.modelReady = true
                     if readiness.monitorStarted {
-                        menuBar.setReady(
-                            modelID: chosenModel.id,
+                        menuBar?.setReady(
+                            modelID: readyModelID,
                             language: settings.transcriptionLanguage
                         )
                     }
@@ -290,12 +302,12 @@ private func transcribe(
     samples: [Float],
     transcriptionService: TranscriptionService,
     overlay: RecordingOverlay?,
-    menuBar: MenuBarController,
+    menuBar: MenuBarController?,
     dumpWav: Bool
 ) {
     MainActor.assumeIsolated {
         overlay?.show(.transcribing)
-        menuBar.setTranscribing()
+        menuBar?.setTranscribing()
     }
     let seconds = Double(samples.count) / AudioCapture.targetSampleRate
     let rms = computeRMS(samples)
@@ -314,7 +326,7 @@ private func transcribe(
     guard !samples.isEmpty else {
         MainActor.assumeIsolated {
             overlay?.hide()
-            menuBar.setRecording(false)
+            menuBar?.setRecording(false)
         }
         return
     }
@@ -329,13 +341,13 @@ private func transcribe(
             await MainActor.run {
                 TextInjector.inject(text)
                 overlay?.hide()
-                menuBar.setRecording(false)
+                menuBar?.setRecording(false)
             }
         } catch {
             FileHandle.standardError.write(Data("transcription failed: \(error)\n".utf8))
             await MainActor.run {
                 overlay?.hide()
-                menuBar.setRecording(false)
+                menuBar?.setRecording(false)
             }
         }
     }
@@ -382,7 +394,13 @@ struct Models: ParsableCommand {
                 print("unknown model: \(id)")
                 throw ExitCode(1)
             }
-            let t = WhisperKitTranscriber(model: m)
+            let t: any Transcriber
+            switch m.engine {
+            case .whisperKit:
+                t = WhisperKitTranscriber(model: m)
+            case .whisperCpp:
+                t = WhisperCppTranscriber(model: m)
+            }
 
             let sem = DispatchSemaphore(value: 0)
             var capturedError: Error?
@@ -392,6 +410,54 @@ struct Models: ParsableCommand {
             }
             sem.wait()
             if let e = capturedError { throw e }
+        }
+    }
+}
+
+/// Internal smoke-test path for exercising the same language router as live
+/// dictation without requiring microphone or Accessibility access.
+struct TranscribeFile: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "transcribe-file",
+        abstract: "Transcribe an audio file (internal verification command).",
+        shouldDisplay: false
+    )
+
+    @Argument(help: "Path to an audio file.")
+    var path: String
+
+    @Option(name: .long, help: "automatic, english, or german")
+    var language: String = TranscriptionLanguage.automatic.rawValue
+
+    func run() throws {
+        guard let selectedLanguage = TranscriptionLanguage(rawValue: language) else {
+            throw ValidationError("language must be automatic, english, or german")
+        }
+        guard let model = ModelRegistry.preferred(for: selectedLanguage) else {
+            throw ValidationError("no model is registered for \(selectedLanguage.rawValue)")
+        }
+
+        let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: path)
+        let service = TranscriptionService(model: model, language: selectedLanguage)
+        let semaphore = DispatchSemaphore(value: 0)
+        var capturedResult: Result<String, Error>?
+        Task.detached {
+            do {
+                try await service.warmUp()
+                capturedResult = .success(try await service.transcribe(samples))
+            } catch {
+                capturedResult = .failure(error)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        switch capturedResult {
+        case let .success(text):
+            print(text)
+        case let .failure(error):
+            throw error
+        case nil:
+            throw TranscriberError.notLoaded
         }
     }
 }

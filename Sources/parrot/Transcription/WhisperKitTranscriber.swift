@@ -60,6 +60,27 @@ actor WhisperKitTranscriber: Transcriber {
         return Self.sanitize(raw)
     }
 
+    func detectLanguage(_ audio: [Float]) async throws -> LanguageDetection {
+        if pipeline == nil { try await warmUp() }
+        guard let pipeline else { throw TranscriberError.notLoaded }
+        let result = try await pipeline.detectLangauge(audioArray: audio)
+        return LanguageDetection(
+            language: result.language,
+            logProbabilities: result.langProbs
+        )
+    }
+
+    func unload() {
+        pipeline = nil
+    }
+
+    static func downloadModel(_ model: TranscriptionModel) async throws {
+        guard let whisperKitID = model.whisperKitID else {
+            throw TranscriberError.missingEngineID
+        }
+        _ = try await WhisperKit.download(variant: whisperKitID)
+    }
+
     static func decodingOptions(for language: TranscriptionLanguage) -> DecodingOptions {
         switch language {
         case .automatic:
@@ -97,40 +118,175 @@ actor WhisperKitTranscriber: Transcriber {
     }
 }
 
+struct LanguageDetection: Equatable {
+    let language: String
+    let logProbabilities: [String: Float]
+}
+
+enum AutomaticLanguageRoute: Equatable {
+    case english
+    case german
+    case multilingualFallback
+}
+
+enum AutomaticLanguageRouter {
+    /// Avoid selecting a specialist when neither English nor German has enough
+    /// probability mass. Within that pair, a small German bias compensates for
+    /// short German phrases that Whisper otherwise tends to label as English.
+    static let minimumSupportedProbability: Float = 0.20
+    static let minimumSupportedTotal: Float = 0.35
+    static let germanPairThreshold: Float = 0.45
+
+    static func route(_ detection: LanguageDetection) -> AutomaticLanguageRoute {
+        let english = probability(detection.logProbabilities["en"])
+        let german = probability(detection.logProbabilities["de"])
+        let supportedTotal = english + german
+
+        guard max(english, german) >= minimumSupportedProbability,
+              supportedTotal >= minimumSupportedTotal
+        else {
+            return .multilingualFallback
+        }
+
+        let germanShare = german / supportedTotal
+        return germanShare >= germanPairThreshold ? .german : .english
+    }
+
+    private static func probability(_ rawScore: Float?) -> Float {
+        guard let rawScore else { return 0 }
+        return rawScore <= 0 ? exp(rawScore) : rawScore
+    }
+}
+
 actor TranscriptionService {
-    private var active: WhisperKitTranscriber
+    private let detector: WhisperKitTranscriber
+    private let english: WhisperKitTranscriber
+    private let german: WhisperCppTranscriber
     private var language: TranscriptionLanguage
     private var languageRequest = 0
+    private let explicitModel: (any Transcriber)?
 
-    init(model: TranscriptionModel, language: TranscriptionLanguage) {
-        self.active = WhisperKitTranscriber(model: model, language: language)
+    init(
+        model: TranscriptionModel,
+        language: TranscriptionLanguage,
+        usesExplicitModel: Bool = false
+    ) {
+        guard let detectorModel = ModelRegistry.preferred(for: .automatic),
+              let englishModel = ModelRegistry.preferred(for: .english),
+              let germanModel = ModelRegistry.preferred(for: .german)
+        else {
+            preconditionFailure("Required automatic-routing models are not registered")
+        }
+        self.detector = WhisperKitTranscriber(
+            model: detectorModel,
+            language: .automatic
+        )
+        self.english = WhisperKitTranscriber(
+            model: englishModel,
+            language: .english
+        )
+        self.german = WhisperCppTranscriber(model: germanModel)
         self.language = language
+        self.explicitModel = usesExplicitModel
+            ? Self.makeTranscriber(model: model, language: language)
+            : nil
     }
 
     func warmUp() async throws {
-        try await active.warmUp()
+        if let explicitModel {
+            try await explicitModel.warmUp()
+            return
+        }
+        try await transcriber(for: language).warmUp()
+        // Every app installation gets both specialists in the background.
+        // The active language is usable before these downloads finish, except
+        // when that specialist is itself the active selection.
+        prefetchAutomaticSpecialists()
     }
 
     func setLanguage(_ language: TranscriptionLanguage) async throws -> String? {
         languageRequest += 1
         let request = languageRequest
-        guard language != self.language else {
-            return active.modelID
-        }
-        guard let model = ModelRegistry.preferred(for: language) else {
-            throw TranscriberError.modelUnavailable
-        }
-
-        let next = WhisperKitTranscriber(model: model, language: language)
+        let next = transcriber(for: language)
         try await next.warmUp()
         guard request == languageRequest else { return nil }
-        active = next
         self.language = language
-        return model.id
+        if language == .automatic {
+            prefetchAutomaticSpecialists()
+            return "automatic · English/German specialists"
+        }
+        return next.modelID
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
-        try await active.transcribe(audio)
+        if let explicitModel {
+            return try await explicitModel.transcribe(audio)
+        }
+        switch language {
+        case .english:
+            return try await english.transcribe(audio)
+        case .german:
+            return try await german.transcribe(audio)
+        case .automatic:
+            let detection = try await detector.detectLanguage(audio)
+            let route = AutomaticLanguageRouter.route(detection)
+            let rawScore = detection.logProbabilities[detection.language] ?? -.infinity
+            FileHandle.standardError.write(Data(
+                "  detected \(detection.language) · logp \(rawScore) · route \(route)\n".utf8
+            ))
+            switch route {
+            case .english:
+                return try await english.transcribe(audio)
+            case .german:
+                return try await german.transcribe(audio)
+            case .multilingualFallback:
+                return try await detector.transcribe(audio)
+            }
+        }
+    }
+
+    private func transcriber(for language: TranscriptionLanguage) -> any Transcriber {
+        switch language {
+        case .automatic: detector
+        case .english: english
+        case .german: german
+        }
+    }
+
+    private nonisolated static func makeTranscriber(
+        model: TranscriptionModel,
+        language: TranscriptionLanguage
+    ) -> any Transcriber {
+        switch model.engine {
+        case .whisperKit:
+            WhisperKitTranscriber(model: model, language: language)
+        case .whisperCpp:
+            WhisperCppTranscriber(model: model)
+        }
+    }
+
+    private func prefetchAutomaticSpecialists() {
+        guard let englishModel = ModelRegistry.preferred(for: .english),
+              let germanModel = ModelRegistry.preferred(for: .german)
+        else { return }
+        Task.detached(priority: .utility) {
+            do {
+                try await WhisperKitTranscriber.downloadModel(englishModel)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "English specialist prefetch failed: \(error)\n".utf8
+                ))
+            }
+        }
+        Task.detached(priority: .utility) {
+            do {
+                _ = try await GermanModelStore.shared.localURL(for: germanModel)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "German specialist prefetch failed: \(error)\n".utf8
+                ))
+            }
+        }
     }
 }
 

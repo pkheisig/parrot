@@ -6,7 +6,8 @@
 2. **Configurable activation.** Record any supported global shortcut and choose hold-to-talk or press-once-to-start/press-again-to-stop.
 3. **Minimal recording feedback.** A small floating pill at the bottom of the screen while recording, so the user knows the mic is hot. Click-through, borderless, hidden when idle.
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
-5. **Pluggable models.** Whisper out of the box; Parakeet (or future engines) via a JSON-driven registry.
+5. **Language-specialized models.** Detect English or German with multilingual
+   Whisper, then route the same recording to the corresponding specialist.
 6. **Native and lean.** One Swift Package executable target. No sidecar processes. No HTTP servers.
 
 ## Non-goals
@@ -16,7 +17,7 @@
 - Cloud transcription providers
 - AI post-processing, summarization, agents
 - Speaker diarization, meeting recording, semantic search
-- Auto-launch at login (user wires this themselves with `launchd` if desired)
+- A full preferences window (settings stay in the menu-bar popover)
 
 ## Why Swift
 
@@ -25,7 +26,10 @@
 - **Permissions plumbing** (microphone, accessibility) is dramatically smoother in a Swift binary than via Rust crates.
 - **AppKit overlay for free.** The recording indicator (see below) is a borderless `NSWindow` — trivial in Swift, awkward in Rust.
 
-The implementation remains a Swift Package executable. `scripts/build-app.sh` wraps the release binary and its `Info.plist` in `Parrot.app`, then applies an ad-hoc local signature. There is no dock icon.
+The implementation remains a Swift Package executable. `scripts/build-app.sh`
+wraps the release binary, the official whisper.cpp framework, and its
+`Info.plist` in `Parrot.app`, then applies an ad-hoc local signature. It installs
+the bundle but never launches it from the build process. There is no dock icon.
 
 ## High-level shape
 
@@ -50,7 +54,7 @@ $ parrot
                                     │  │ WhisperKit │  │
                                     │  └────────────┘  │
                                     │  ┌────────────┐  │
-                                    │  │  Parakeet  │  │
+                                    │  │whisper.cpp │  │
                                     │  └────────────┘  │
                                     └────────┬─────────┘
                                              │ String
@@ -94,8 +98,15 @@ protocol Transcriber {
 
 Concrete implementations:
 
-- `WhisperKitTranscriber` — wraps the `WhisperKit` package. CoreML, ANE-accelerated.
-- `ParakeetTranscriber` — wraps `FluidAudio` (or direct CoreML) for NVIDIA Parakeet TDT.
+- `WhisperKitTranscriber` — wraps WhisperKit for the multilingual detector,
+  multilingual fallback, and English specialist. CoreML/ANE-accelerated.
+- `WhisperCppTranscriber` — wraps the official whisper.cpp XCFramework for the
+  German fine-tuned GGML model. Metal-accelerated.
+
+`TranscriptionService` owns the language router. Automatic mode detects the
+language from the finished recording, selects the English or German specialist
+only above the confidence threshold, and otherwise transcribes with the
+multilingual detector.
 
 Adding an engine = one new file conforming to `Transcriber`.
 
@@ -126,13 +137,13 @@ The recording overlay and menu-bar settings popover require the `NSApplication` 
 
 ### `ModelRegistry`
 
-JSON-driven, mirrors OpenWhispr's pattern:
+Source-defined registry:
 
 ```swift
 struct TranscriptionModel: Codable {
     let id: String              // "whisper-large-v3-turbo"
     let displayName: String
-    let engine: Engine          // .whisperKit | .parakeet
+    let engine: Engine          // .whisperKit | .whisperCpp
     let sizeMB: Int
     let downloadURL: URL
     let languages: [String]
@@ -142,17 +153,24 @@ struct TranscriptionModel: Codable {
 enum Engine: String, Codable { case whisperKit, parakeet }
 ```
 
-Backed by a bundled `models.json` resource. Adding a model = appending an entry. Adding an engine = one new `Transcriber` conformance + one entry in the `Engine` enum.
+The registry lives in `ModelRegistry.swift`; no sidecar resource is required.
+Adding an engine requires a new `Transcriber` conformance and an `Engine` case.
 
 The registry is the single source of truth for: download URLs, file names, sizes, recommended flags, what shows up in `parrot models list`.
 
 ### `ModelDownloader`
 
-On first selection (or via `parrot models download <id>`), downloads to `~/Library/Application Support/parrot/models/<engine>/<id>/`. Progress bar to stderr (using `\r` overwrites). Resumable, validates size. Refuses to start the daemon if the selected model isn't present.
+WhisperKit manages its CoreML model cache. `GermanModelStore` downloads the
+pinned German GGML asset to `~/Library/Application Support/Parrot/Models/`,
+verifies its SHA-256 digest, and coalesces concurrent requests. The app
+prefetches the English and German specialists after the active startup model is
+ready.
 
 ### `DictationSettings`
 
-Persists the recorded shortcut and activation mode in the `com.digimata.parrot` user-defaults suite. Defaults remain Fn + Hold.
+Persists the shortcut, activation mode, and language in the legacy
+`com.digimata.parrot` user-defaults suite so the clean 0.2 app identity keeps
+existing user settings. Defaults remain Fn + Hold + Automatic.
 
 ### `MenuBarController`
 
@@ -181,15 +199,17 @@ Initial registry:
 
 | Engine | Model | Size | Notes |
 |---|---|---|---|
-| WhisperKit | `whisper-base.en` | ~80 MB | Fast, English only, low resource |
-| WhisperKit | `whisper-large-v3-turbo` | ~800 MB | Recommended for daily use |
-| Parakeet | `parakeet-tdt-0.6b-v3` | ~600 MB | English, fastest on ANE |
+| WhisperKit | `whisper-small` | ~488 MB | Automatic detector and fallback |
+| WhisperKit | `whisper-base.en` | ~145 MB | English specialist |
+| whisper.cpp | `whisper-large-v3-turbo-german-q5` | ~548 MB | German specialist |
+| WhisperKit | `whisper-large-v3-turbo` | ~1.6 GB | Optional multilingual CLI model |
 
-Models live in `~/Library/Application Support/parrot/models/`. Not bundled — fetched on first selection or via `parrot models download`.
+Models are not bundled. WhisperKit uses its own cache; the German GGML model
+lives under `~/Library/Application Support/Parrot/Models/`.
 
 ## Data flow, end-to-end
 
-1. User runs `parrot` in a terminal.
+1. User opens `/Applications/Parrot.app`.
 2. `ParrotCLI` validates permissions (`parrot doctor` logic), loads config, instantiates modules.
 3. Sets `.accessory` activation policy and enters `NSApp.run()`. Status: `listening`. Overlay hidden.
 4. User holds Fn.
@@ -197,13 +217,15 @@ Models live in `~/Library/Application Support/parrot/models/`. Not bundled — f
 6. `AudioCapture` starts the AVAudioEngine tap. Buffers fill. Overlay animates mic level.
 7. User releases Fn.
 8. `HotkeyMonitor` fires `.released`. Overlay switches to spinner. Status: `transcribing`.
-9. `AudioCapture` stops, hands buffer to active `Transcriber`.
-10. `Transcriber` runs CoreML inference. Returns string.
+9. `AudioCapture` stops and hands the buffer to `TranscriptionService`.
+10. Automatic mode detects the language and routes English/German to a
+    specialist. Other or ambiguous languages use the multilingual fallback.
 11. `TextInjector` posts the string at the cursor.
 12. Overlay hides. Status: `listening`. Loop.
-13. User hits `^C`. Process exits cleanly.
+13. User chooses **Quit Parrot** from the menu-bar popover.
 
-End-to-end latency target: <500 ms after hotkey release for utterances under 10 seconds, on Apple Silicon.
+English Base targets sub-second post-recording latency on Apple Silicon. The
+larger German model trades additional latency and memory for accuracy.
 
 ## What we are deliberately NOT building
 
@@ -215,7 +237,7 @@ End-to-end latency target: <500 ms after hotkey release for utterances under 10 
 
 These are deliberate cuts. Each can be revisited if real usage demands it.
 
-## Project layout (planned)
+## Project layout
 
 Organized by feature area. These are folders within a single SPM executable target — Swift sees them as one module, but the directory grouping keeps related code together. If a group later earns its keep as a reusable library (e.g. `Transcription` consumed by another tool), it can be promoted to its own SPM target with no rewriting.
 
@@ -223,18 +245,17 @@ Organized by feature area. These are folders within a single SPM executable targ
 parrot/
   Package.swift                 # SPM, single executable target
   Sources/parrot/
-    main.swift                  # entry point, argument parsing, NSApp.run()
-    Config.swift
+    Parrot.swift                # entry point, argument parsing, NSApp.run()
+    AppIdentity.swift           # bundle and status-item identities
     Doctor.swift
 
     Transcription/              # the inference layer
       Transcriber.swift         # protocol
       WhisperKitTranscriber.swift
-      ParakeetTranscriber.swift
+      WhisperCppTranscriber.swift
 
-    Models/                     # registry + download pipeline
+    Models/                     # source-defined registry
       ModelRegistry.swift
-      ModelDownloader.swift
       TranscriptionModel.swift  # Codable types
 
     Audio/
@@ -246,23 +267,26 @@ parrot/
 
     UI/
       RecordingOverlay.swift    # borderless NSWindow + SwiftUI pill
+      MenuBarController.swift   # status item and compact settings
 
-  Resources/
-    models.json
+  App/
+    Info.plist
   docs/
     architecture.md
   README.md
 ```
 
-Build: `swift build -c release`. Resulting binary at `.build/release/parrot`. Install: copy to `~/.local/bin/` or `/usr/local/bin/`.
+Build/install the app with `scripts/build-app.sh`. For CLI use, the release
+binary remains available at SwiftPM's release binary path.
 
 ### On Swift "modules"
 
 Swift's module unit is the **SPM target** (one target = one module = one `import` namespace). For parrot v1 we use a single executable target with the folder structure above; everything is in the same module so no `import` statements between files. If we ever want enforced boundaries (e.g. `Transcription` and `UI` shouldn't reach into `Audio` internals), we promote folders to separate targets in `Package.swift` — a structural change, not a semantic one.
 
-## Open questions
+## Packaging constraints
 
-- **Parakeet via FluidAudio vs. direct CoreML?** FluidAudio is faster to integrate but adds a dependency. Decide once we benchmark both.
-- **Hotkey conflicts.** Right-Option is unused on most keyboards but some users remap it. Print a clear error if `CGEventTap` registration fails.
-- **First-run UX.** Bundle `whisper-base.en` so `parrot` works out of the box, or always require an explicit download? Probably the latter — keeps the binary small and the model directory clean.
-- **Code signing.** A self-built unsigned binary works fine locally but accessibility permission persistence is more reliable for signed binaries. Decide if we sign for personal distribution.
+The local bundle is ad-hoc signed, so each rebuild resets Microphone and
+Accessibility consent. The build script intentionally stops after installation:
+the user launches the new app from `/Applications`, which prevents the status
+item from being attributed to the build host. The standalone CLI is headless
+and never creates a second menu-bar status item.

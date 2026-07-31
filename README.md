@@ -12,8 +12,10 @@ open /Applications/Parrot.app
 This creates a native menu-bar application at `dist/Parrot.app` and replaces
 the validated Parrot bundle at `/Applications/Parrot.app`. Because local
 ad-hoc signatures change on rebuild, the script resets Accessibility and
-Microphone consent and launches the new app. Re-enable the permissions when
-macOS prompts. Enable **Launch Parrot at login** from the menu-bar popover.
+Microphone consent. It deliberately does not launch the app from the build
+session: open `/Applications/Parrot.app` yourself so macOS attributes the
+menu-bar item and its permissions directly to Parrot. Re-enable the permissions
+when macOS prompts. Enable **Launch Parrot at login** from the menu-bar popover.
 
 ## Command-line install
 
@@ -37,10 +39,13 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
 
 The **Language** setting supports English, German, or Automatic recognition.
-German and Automatic use the 147 MB multilingual Whisper Base model, which
-downloads to WhisperKit's local cache on first use. Audio remains on the Mac.
-Whisper Large v3 Turbo remains available through the CLI when maximum accuracy
-is worth a much larger model and slower startup.
+Automatic first uses the stronger 488 MB multilingual Whisper Small model to detect the
+language. Confident English is then transcribed with the English-specific
+Whisper Base model; confident German is transcribed with the German-specific
+Whisper Large v3 Turbo Q5 model. Other or ambiguous languages fall back to the
+multilingual model. The English (~145 MB) and German (~548 MB) specialists are
+prefetched in the background on first app launch and cached locally. Audio
+remains on the Mac; only model downloads use the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
@@ -62,6 +67,7 @@ parrot --no-overlay                    # disable the bottom-of-screen pill
 
 - **Swift** — single SPM executable target
 - **WhisperKit** — Whisper inference via CoreML, ANE-accelerated
+- **whisper.cpp** — German specialist inference via Metal
 - **AVAudioEngine** — mic capture
 - **CGEventTap** — global hotkey
 - **CGEvent** — text injection at cursor

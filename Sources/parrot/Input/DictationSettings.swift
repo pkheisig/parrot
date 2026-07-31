@@ -119,10 +119,10 @@ final class DictationSettings {
     init(defaults: UserDefaults? = nil) {
         if let defaults {
             self.defaults = defaults
-        } else if Bundle.main.bundleIdentifier == "com.digimata.parrot" {
-            self.defaults = .standard
         } else {
-            self.defaults = UserDefaults(suiteName: "com.digimata.parrot") ?? .standard
+            // Keep preferences in the original suite so the clean app identity
+            // introduced in 0.2 does not discard an existing hotkey or mode.
+            self.defaults = UserDefaults(suiteName: AppIdentity.preferencesSuite) ?? .standard
         }
     }
 

@@ -35,6 +35,27 @@ enum ModelRegistry {
             recommended: false
         ),
         TranscriptionModel(
+            id: "whisper-small",
+            displayName: "Whisper Small (Multilingual Detector)",
+            engine: .whisperKit,
+            whisperKitID: "openai_whisper-small",
+            sizeMB: 488,
+            languages: ["multi"],
+            recommended: false
+        ),
+        TranscriptionModel(
+            id: "whisper-large-v3-turbo-german-q5",
+            displayName: "Whisper Large v3 Turbo (German)",
+            engine: .whisperCpp,
+            sizeMB: 548,
+            languages: ["de"],
+            recommended: false,
+            downloadURL: URL(
+                string: "https://huggingface.co/MolyProduction/whisper-large-v3-turbo-german-ggml-q5_0/resolve/8ca650615c50e0d16a49de2bf707d2791242d829/ggml-large-v3-turbo-german-q5_0.bin"
+            ),
+            sha256: "15e92e3db0993c52fffa781513eec9253475331c1be808f8fb409285c9d9d030"
+        ),
+        TranscriptionModel(
             id: "whisper-small.en",
             displayName: "Whisper Small (English)",
             engine: .whisperKit,
@@ -57,8 +78,10 @@ enum ModelRegistry {
         switch language {
         case .english:
             return find("whisper-base.en")
-        case .automatic, .german:
-            return find("whisper-base")
+        case .automatic:
+            return find("whisper-small")
+        case .german:
+            return find("whisper-large-v3-turbo-german-q5")
         }
     }
 }

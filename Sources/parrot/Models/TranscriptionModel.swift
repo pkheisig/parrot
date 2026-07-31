@@ -2,7 +2,7 @@ import Foundation
 
 enum Engine: String, Codable {
     case whisperKit
-    case parakeet
+    case whisperCpp
 }
 
 struct TranscriptionModel: Codable {
@@ -14,6 +14,32 @@ struct TranscriptionModel: Codable {
     let sizeMB: Int
     let languages: [String]
     let recommended: Bool
+    /// Direct model download used by engines that do not use WhisperKit's
+    /// Hugging Face repository layout.
+    let downloadURL: URL?
+    let sha256: String?
+
+    init(
+        id: String,
+        displayName: String,
+        engine: Engine,
+        whisperKitID: String? = nil,
+        sizeMB: Int,
+        languages: [String],
+        recommended: Bool,
+        downloadURL: URL? = nil,
+        sha256: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.engine = engine
+        self.whisperKitID = whisperKitID
+        self.sizeMB = sizeMB
+        self.languages = languages
+        self.recommended = recommended
+        self.downloadURL = downloadURL
+        self.sha256 = sha256
+    }
 }
 
 struct ModelsManifest: Codable {

@@ -4,6 +4,8 @@ import CoreGraphics
 /// Compact settings popover anchored to the menu-bar icon.
 @MainActor
 final class MenuBarController: NSObject, NSPopoverDelegate {
+    static let statusItemAutosaveName = AppIdentity.statusItemAutosaveName
+
     var onShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
     var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
@@ -23,6 +25,13 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             language: settings.transcriptionLanguage
         )
         super.init()
+
+        // A stable autosave identity prevents AppKit from manufacturing a new
+        // status-item identity after each ad-hoc rebuild. The item is the app's
+        // only settings surface, so it is intentionally not user-removable.
+        statusItem.autosaveName = Self.statusItemAutosaveName
+        statusItem.behavior = []
+        statusItem.isVisible = true
 
         contentController.onShortcutChanged = { [weak self] shortcut in
             self?.settings.shortcut = shortcut
@@ -53,14 +62,19 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
         if let button = statusItem.button {
             let image = Self.birdImage()
+                ?? NSImage(systemSymbolName: "waveform", accessibilityDescription: "Parrot")
             image?.isTemplate = true
             button.image = image
             button.imagePosition = .imageOnly
+            button.imageScaling = .scaleProportionallyDown
             button.target = self
             button.action = #selector(togglePopover)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
             button.toolTip = "Parrot settings"
         }
+        FileHandle.standardError.write(Data(
+            "menu-bar item ready · \(Self.statusItemAutosaveName)\n".utf8
+        ))
     }
 
     func setRecording(_ recording: Bool) {
