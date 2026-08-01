@@ -1,11 +1,12 @@
 import AppKit
 import ApplicationServices
 import ArgumentParser
+import Darwin
 import Foundation
 import WhisperKit
 
 @main
-struct Parrot: AsyncParsableCommand {
+struct Parrot: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "parrot",
         abstract: "Minimal macOS dictation daemon with a configurable global hotkey.",
@@ -20,7 +21,7 @@ struct Parrot: AsyncParsableCommand {
 /// Internal end-to-end delivery probe used by the local UI test harness. It
 /// deliberately bypasses audio and model inference while exercising the exact
 /// production target capture and TextInjector transaction.
-struct DeliverTest: AsyncParsableCommand {
+struct DeliverTest: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "deliver-test",
         abstract: "Deliver fixed text to the focused application for UI verification."
@@ -29,29 +30,37 @@ struct DeliverTest: AsyncParsableCommand {
     @Argument(help: "Text to deliver to the focused application.")
     var text: String
 
-    @MainActor
-    mutating func run() async throws {
-        let target = TextInjector.captureTarget()
-        if let target {
-            print(
-                "target=\(target.applicationName)[\(target.processIdentifier)] "
-                    + "classification=\(target.classification.logLabel)"
+    mutating func run() throws {
+        let text = self.text
+        Task { @MainActor in
+            let target = TextInjector.captureTarget()
+            var output: [String] = []
+            if let target {
+                output.append(
+                    "target=\(target.applicationName)[\(target.processIdentifier)] "
+                        + "classification=\(target.classification.logLabel)"
+                )
+            } else {
+                output.append("target=none")
+            }
+            let candidateSnapshot = FocusedTextSnapshot.capture()
+            let snapshot = target.flatMap { target in
+                candidateSnapshot?.belongs(to: target.processIdentifier) == true
+                    ? candidateSnapshot
+                    : nil
+            }
+            let delivery = await TextInjector.deliver(
+                text,
+                to: target,
+                verificationSnapshot: snapshot
             )
-        } else {
-            print("target=none")
+            output.append(delivery.testDescription)
+            FileHandle.standardOutput.write(
+                Data((output.joined(separator: "\n") + "\n").utf8)
+            )
+            Darwin.exit(EXIT_SUCCESS)
         }
-        let candidateSnapshot = FocusedTextSnapshot.capture()
-        let snapshot = target.flatMap { target in
-            candidateSnapshot?.belongs(to: target.processIdentifier) == true
-                ? candidateSnapshot
-                : nil
-        }
-        let delivery = await TextInjector.deliver(
-            text,
-            to: target,
-            verificationSnapshot: snapshot
-        )
-        print(delivery.testDescription)
+        dispatchMain()
     }
 }
 
