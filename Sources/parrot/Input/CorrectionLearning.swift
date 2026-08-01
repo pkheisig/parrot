@@ -110,7 +110,7 @@ final class CorrectionLearningController {
     }
 }
 
-struct FocusedTextSnapshot {
+struct FocusedTextSnapshot: Sendable {
     private static let anchorLength = 64
 
     private let processIdentifier: pid_t

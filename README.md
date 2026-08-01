@@ -39,9 +39,12 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
    speaking, then reconciles only the unfinished tail on release. Automatic and
    German modes still transcribe the completed recording because routing or the
    German specialist requires the finished audio. Parrot recognizes native,
-   web, and Electron text editors through writable attributes and semantic text
-   roles. If no text editor is focused, it copies the transcript and shows a brief
+   web, Electron, and opaque custom editors. Positively identified non-text
+   controls copy the transcript to the clipboard and show a brief
    **Copied to clipboard** pill instead of sending keystrokes to the wrong place.
+   The destination application is captured when recording stops, so a delayed
+   transcript cannot be redirected by Cmd-Tab or overlay focus. Opaque editors
+   receive direct application-targeted input plus a clipboard safety copy.
 
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
 

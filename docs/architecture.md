@@ -129,10 +129,19 @@ Before posting keyboard events, Parrot inspects the focused Accessibility
 element and its parent chain. Native writable attributes, semantic text roles,
 and Chromium contenteditable marker ranges all identify a valid target. This
 handles custom Electron/WebKit editors that do not mark `AXValue` as settable.
+Opaque controls that accept typing but expose no text metadata, including some
+Word and Codex editor surfaces, receive an optimistic insertion attempt. Only
+positively identified non-text roles trigger the clipboard fallback.
 A valid target receives the transcript through `CGEventCreateKeyboardEvent` plus
 `CGEventKeyboardSetUnicodeString`. Without one, Parrot puts the transcript on
 the system clipboard and shows the same overlay capsule in a temporary **Copied
 to clipboard** state rather than typing into an unrelated window.
+
+The target application PID and the readable correction snapshot are captured at
+hotkey release, before asynchronous transcription can change timing or focus.
+Unicode events are posted directly to that PID rather than to the global session
+focus. Ambiguous custom editors also retain the transcript on the clipboard as a
+safety copy, so a rejected event can never discard the result.
 
 Before injection, `FocusedTextSnapshot` records the focused Accessibility text
 element, insertion range, and short surrounding anchors. Pressing the Learn

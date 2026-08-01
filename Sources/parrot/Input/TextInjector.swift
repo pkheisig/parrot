@@ -10,29 +10,66 @@ import Foundation
 enum TextInjector {
     enum Delivery: Equatable {
         case inserted
+        case insertedWithClipboardBackup
         case copiedToClipboard
+    }
+
+    struct Target: Equatable, Sendable {
+        let processIdentifier: pid_t
+        let applicationName: String
+        let classification: TextTargetClassification
     }
 
     /// Insert into the focused text element. Native controls expose writable
     /// attributes, while Electron/WebKit editors often expose only a semantic
-    /// text role. If neither signal exists on the element or its parents,
-    /// preserve the transcript on the clipboard instead of sending blind
-    /// keystrokes to an unrelated window.
-    static func deliver(_ text: String) -> Delivery {
-        guard hasFocusedTextTarget() else {
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
+    /// text role. Opaque custom editors get an insertion attempt; only a
+    /// positively identified non-text control uses the clipboard fallback.
+    static func deliver(_ text: String, to target: Target?) -> Delivery {
+        guard let target,
+              NSRunningApplication(processIdentifier: target.processIdentifier) != nil
+        else {
+            copyToClipboard(text)
             return .copiedToClipboard
         }
-        inject(text)
-        return .inserted
+
+        switch target.classification {
+        case .knownNonText:
+            copyToClipboard(text)
+            return .copiedToClipboard
+        case .knownText:
+            inject(text, processIdentifier: target.processIdentifier)
+            return .inserted
+        case .ambiguous:
+            // Opaque custom editors cannot be verified after delivery. Keep a
+            // recoverable copy while still sending directly to the application.
+            copyToClipboard(text)
+            NSLog(
+                "Parrot: opaque target %@[%d]; inserting with clipboard backup",
+                target.applicationName,
+                target.processIdentifier
+            )
+            inject(text, processIdentifier: target.processIdentifier)
+            return .insertedWithClipboardBackup
+        }
+    }
+
+    static func captureTarget() -> Target? {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.processIdentifier != getpid()
+        else {
+            return nil
+        }
+        return Target(
+            processIdentifier: application.processIdentifier,
+            applicationName: application.localizedName ?? application.bundleIdentifier ?? "app",
+            classification: focusedTargetClassification()
+        )
     }
 
     /// Inject the given text at the current cursor location.
     /// Splits long strings into chunks because the underlying API has a
     /// per-event character limit (~20 chars).
-    static func inject(_ text: String) {
+    static func inject(_ text: String, processIdentifier: pid_t? = nil) {
         guard !text.isEmpty else { return }
 
         let utf16 = Array(text.utf16)
@@ -42,12 +79,12 @@ enum TextInjector {
         while index < utf16.count {
             let end = min(index + chunkSize, utf16.count)
             var chunk = Array(utf16[index..<end])
-            postChunk(&chunk)
+            postChunk(&chunk, processIdentifier: processIdentifier)
             index = end
         }
     }
 
-    private static func hasFocusedTextTarget() -> Bool {
+    private static func focusedTargetClassification() -> TextTargetClassification {
         let system = AXUIElementCreateSystemWide()
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -56,15 +93,23 @@ enum TextInjector {
             &raw
         ) == .success,
               let raw
-        else { return false }
+        else {
+            NSLog("Parrot: focused Accessibility element unavailable; attempting insertion")
+            return .ambiguous
+        }
 
         var element = unsafeBitCast(raw, to: AXUIElement.self)
         var inspectedRoles: [String] = []
-        for _ in 0..<6 {
+        var focusedClassification = TextTargetClassification.ambiguous
+        for depth in 0..<6 {
             let evidence = destinationEvidence(for: element)
             inspectedRoles.append(evidence.role ?? "unknown")
-            if TextDestinationClassifier.isTextTarget(evidence) {
-                return true
+            let classification = TextDestinationClassifier.classify(evidence)
+            if depth == 0 {
+                focusedClassification = classification
+            }
+            if classification == .knownText {
+                return .knownText
             }
             guard let parent = elementAttribute(
                 element,
@@ -72,10 +117,18 @@ enum TextInjector {
             ) else { break }
             element = parent
         }
-        FileHandle.standardError.write(Data(
-            "no text target in focused AX path: \(inspectedRoles.joined(separator: " > "))\n".utf8
-        ))
-        return false
+        if focusedClassification == .knownNonText {
+            NSLog(
+                "Parrot: non-text Accessibility target: %@",
+                inspectedRoles.joined(separator: " > ")
+            )
+            return .knownNonText
+        }
+        NSLog(
+            "Parrot: ambiguous Accessibility target: %@",
+            inspectedRoles.joined(separator: " > ")
+        )
+        return .ambiguous
     }
 
     private static func destinationEvidence(
@@ -156,17 +209,35 @@ enum TextInjector {
         return unsafeBitCast(raw, to: AXUIElement.self)
     }
 
-    private static func postChunk(_ chunk: inout [UniChar]) {
+    private static func postChunk(
+        _ chunk: inout [UniChar],
+        processIdentifier: pid_t?
+    ) {
         let length = chunk.count
         guard length > 0 else { return }
 
-        let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
         down?.keyboardSetUnicodeString(stringLength: length, unicodeString: &chunk)
-        down?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            down?.postToPid(processIdentifier)
+        } else {
+            down?.post(tap: .cgSessionEventTap)
+        }
 
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
         up?.keyboardSetUnicodeString(stringLength: length, unicodeString: &chunk)
-        up?.post(tap: .cgSessionEventTap)
+        if let processIdentifier {
+            up?.postToPid(processIdentifier)
+        } else {
+            up?.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    private static func copyToClipboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 }
 
@@ -177,6 +248,12 @@ struct TextDestinationEvidence {
     let attributeNames: Set<String>
     let hasSettableTextAttribute: Bool
     let isEnabled: Bool?
+}
+
+enum TextTargetClassification: Equatable {
+    case knownText
+    case knownNonText
+    case ambiguous
 }
 
 enum TextDestinationClassifier {
@@ -198,16 +275,39 @@ enum TextDestinationClassifier {
         kAXSecureTextFieldSubrole,
     ]
 
-    static func isTextTarget(_ evidence: TextDestinationEvidence) -> Bool {
-        guard evidence.isEnabled != false else { return false }
-        if evidence.hasSettableTextAttribute { return true }
-        if evidence.role.map(textRoles.contains) == true { return true }
-        if evidence.subrole.map(textSubroles.contains) == true { return true }
+    private static let nonTextRoles: Set<String> = [
+        kAXApplicationRole,
+        kAXWindowRole,
+        kAXButtonRole,
+        kAXCheckBoxRole,
+        kAXRadioButtonRole,
+        kAXMenuRole,
+        kAXMenuBarRole,
+        kAXMenuItemRole,
+        kAXStaticTextRole,
+        kAXImageRole,
+        "AXLink",
+        kAXSliderRole,
+        kAXScrollBarRole,
+        kAXPopUpButtonRole,
+        kAXProgressIndicatorRole,
+        kAXBusyIndicatorRole,
+        kAXToolbarRole,
+        kAXTabGroupRole,
+    ]
+
+    static func classify(
+        _ evidence: TextDestinationEvidence
+    ) -> TextTargetClassification {
+        if evidence.isEnabled == false { return .knownNonText }
+        if evidence.hasSettableTextAttribute { return .knownText }
+        if evidence.role.map(textRoles.contains) == true { return .knownText }
+        if evidence.subrole.map(textSubroles.contains) == true { return .knownText }
 
         let description = evidence.roleDescription?.lowercased() ?? ""
         if ["text field", "text area", "text view", "search field", "editor"]
             .contains(where: description.contains) {
-            return true
+            return .knownText
         }
 
         // Chromium contenteditable controls can identify themselves through
@@ -215,6 +315,8 @@ enum TextDestinationClassifier {
         let hasMarkerRange = evidence.attributeNames.contains("AXSelectedTextMarkerRange")
         let hasTextContent = evidence.attributeNames.contains(kAXValueAttribute)
             || evidence.attributeNames.contains("AXNumberOfCharacters")
-        return hasMarkerRange && hasTextContent
+        if hasMarkerRange && hasTextContent { return .knownText }
+        if evidence.role.map(nonTextRoles.contains) == true { return .knownNonText }
+        return .ambiguous
     }
 }

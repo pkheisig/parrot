@@ -112,6 +112,8 @@ struct Run: ParsableCommand {
         var isRecording = false
         var usesBufferedStream = false
         var bufferedStartTask: Task<Void, Error>?
+        var recordingTarget: TextInjector.Target?
+        var recordingSnapshot: FocusedTextSnapshot?
         let readiness = MainActor.assumeIsolated {
             RuntimeReadiness(modelReady: !isAppBundle)
         }
@@ -157,6 +159,8 @@ struct Run: ParsableCommand {
                 }
                 if recordingMode == .toggle, isRecording {
                     isRecording = false
+                    let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
+                    let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
                     if usesBufferedStream {
                         finishBufferedTranscription(
                             startTask: bufferedStartTask,
@@ -164,7 +168,9 @@ struct Run: ParsableCommand {
                             overlay: overlay,
                             menuBar: menuBar,
                             dumpWav: dumpWav,
-                            learningController: learningController
+                            learningController: learningController,
+                            deliveryTarget: deliveryTarget,
+                            deliverySnapshot: deliverySnapshot
                         )
                     } else {
                         let samples = capture.stop()
@@ -174,14 +180,20 @@ struct Run: ParsableCommand {
                             overlay: overlay,
                             menuBar: menuBar,
                             dumpWav: dumpWav,
-                            learningController: learningController
+                            learningController: learningController,
+                            deliveryTarget: deliveryTarget,
+                            deliverySnapshot: deliverySnapshot
                         )
                     }
                     usesBufferedStream = false
                     bufferedStartTask = nil
+                    recordingTarget = nil
+                    recordingSnapshot = nil
                     return
                 }
                 guard !isRecording else { return }
+                recordingTarget = TextInjector.captureTarget()
+                recordingSnapshot = FocusedTextSnapshot.capture()
                 recordingMode = activationMode
                 usesBufferedStream = model == nil
                     && settings.transcriptionLanguage == .english
@@ -213,6 +225,8 @@ struct Run: ParsableCommand {
             case .released:
                 guard recordingMode == .hold, isRecording else { return }
                 isRecording = false
+                let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
+                let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
                 if usesBufferedStream {
                     finishBufferedTranscription(
                         startTask: bufferedStartTask,
@@ -220,7 +234,9 @@ struct Run: ParsableCommand {
                         overlay: overlay,
                         menuBar: menuBar,
                         dumpWav: dumpWav,
-                        learningController: learningController
+                        learningController: learningController,
+                        deliveryTarget: deliveryTarget,
+                        deliverySnapshot: deliverySnapshot
                     )
                 } else {
                     let samples = capture.stop()
@@ -230,11 +246,15 @@ struct Run: ParsableCommand {
                         overlay: overlay,
                         menuBar: menuBar,
                         dumpWav: dumpWav,
-                        learningController: learningController
+                        learningController: learningController,
+                        deliveryTarget: deliveryTarget,
+                        deliverySnapshot: deliverySnapshot
                     )
                 }
                 usesBufferedStream = false
                 bufferedStartTask = nil
+                recordingTarget = nil
+                recordingSnapshot = nil
             case .cancelRequested:
                 guard isRecording else { return }
                 isRecording = false
@@ -249,6 +269,8 @@ struct Run: ParsableCommand {
                 }
                 usesBufferedStream = false
                 bufferedStartTask = nil
+                recordingTarget = nil
+                recordingSnapshot = nil
                 FileHandle.standardError.write(Data("recording canceled\n".utf8))
                 MainActor.assumeIsolated {
                     overlay?.hide()
@@ -409,7 +431,9 @@ private func transcribe(
     overlay: RecordingOverlay?,
     menuBar: MenuBarController?,
     dumpWav: Bool,
-    learningController: CorrectionLearningController
+    learningController: CorrectionLearningController,
+    deliveryTarget: TextInjector.Target?,
+    deliverySnapshot: FocusedTextSnapshot?
 ) {
     MainActor.assumeIsolated {
         overlay?.show(.transcribing)
@@ -449,7 +473,9 @@ private func transcribe(
                     text,
                     overlay: overlay,
                     menuBar: menuBar,
-                    learningController: learningController
+                    learningController: learningController,
+                    deliveryTarget: deliveryTarget,
+                    deliverySnapshot: deliverySnapshot
                 )
             }
         } catch {
@@ -468,7 +494,9 @@ private func finishBufferedTranscription(
     overlay: RecordingOverlay?,
     menuBar: MenuBarController?,
     dumpWav: Bool,
-    learningController: CorrectionLearningController
+    learningController: CorrectionLearningController,
+    deliveryTarget: TextInjector.Target?,
+    deliverySnapshot: FocusedTextSnapshot?
 ) {
     MainActor.assumeIsolated {
         overlay?.show(.transcribing)
@@ -506,7 +534,9 @@ private func finishBufferedTranscription(
                     result.text,
                     overlay: overlay,
                     menuBar: menuBar,
-                    learningController: learningController
+                    learningController: learningController,
+                    deliveryTarget: deliveryTarget,
+                    deliverySnapshot: deliverySnapshot
                 )
             }
         } catch {
@@ -527,21 +557,30 @@ private func deliverTranscript(
     _ text: String,
     overlay: RecordingOverlay?,
     menuBar: MenuBarController?,
-    learningController: CorrectionLearningController
+    learningController: CorrectionLearningController,
+    deliveryTarget: TextInjector.Target?,
+    deliverySnapshot: FocusedTextSnapshot?
 ) {
     guard !text.isEmpty else {
         overlay?.hide()
         menuBar?.setRecording(false)
         return
     }
-    let snapshot = FocusedTextSnapshot.capture()
-    let delivery = TextInjector.deliver(text)
+    let snapshot = deliverySnapshot ?? FocusedTextSnapshot.capture()
+    let target = deliveryTarget ?? TextInjector.captureTarget()
+    let delivery = TextInjector.deliver(text, to: target)
     learningController.remember(insertedText: text, snapshot: snapshot)
     menuBar?.setRecording(false)
 
     switch delivery {
     case .inserted:
         overlay?.hide()
+    case .insertedWithClipboardBackup:
+        FileHandle.standardError.write(Data(
+            "opaque text target · inserted with clipboard backup\n".utf8
+        ))
+        overlay?.showCopiedToClipboard()
+        menuBar?.setCopiedToClipboard()
     case .copiedToClipboard:
         FileHandle.standardError.write(Data(
             "no writable text target · copied transcript to clipboard\n".utf8

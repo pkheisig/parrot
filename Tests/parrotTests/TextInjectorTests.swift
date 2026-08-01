@@ -4,42 +4,72 @@ import XCTest
 
 final class TextInjectorTests: XCTestCase {
     func testRecognizesEachWritableAccessibilityTextAttribute() {
-        XCTAssertTrue(TextDestinationClassifier.isTextTarget(evidence(writable: true)))
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(evidence(writable: true)),
+            .knownText
+        )
     }
 
-    func testRejectsFocusedElementWithoutWritableTextAttributes() {
-        XCTAssertFalse(TextDestinationClassifier.isTextTarget(evidence(role: kAXGroupRole)))
+    func testTreatsOpaqueCustomEditorAsAmbiguousInsteadOfNonText() {
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(evidence(role: kAXGroupRole)),
+            .ambiguous
+        )
     }
 
     func testRecognizesElectronTextAreaWithoutSettableValue() {
-        XCTAssertTrue(TextDestinationClassifier.isTextTarget(evidence(role: kAXTextAreaRole)))
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(evidence(role: kAXTextAreaRole)),
+            .knownText
+        )
     }
 
     func testRecognizesTextEditorAncestorByRoleDescription() {
-        XCTAssertTrue(
-            TextDestinationClassifier.isTextTarget(
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(
                 evidence(role: kAXGroupRole, description: "message text editor")
-            )
+            ),
+            .knownText
         )
     }
 
     func testRecognizesChromiumContentEditableMarkerAttributes() {
-        XCTAssertTrue(
-            TextDestinationClassifier.isTextTarget(
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(
                 evidence(
                     role: kAXGroupRole,
                     attributes: ["AXSelectedTextMarkerRange", kAXValueAttribute]
                 )
-            )
+            ),
+            .knownText
         )
     }
 
     func testDisabledTextControlIsRejected() {
-        XCTAssertFalse(
-            TextDestinationClassifier.isTextTarget(
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(
                 evidence(role: kAXTextAreaRole, enabled: false)
-            )
+            ),
+            .knownNonText
         )
+    }
+
+    func testKnownNonTextControlUsesClipboardClassification() {
+        XCTAssertEqual(
+            TextDestinationClassifier.classify(evidence(role: kAXButtonRole)),
+            .knownNonText
+        )
+    }
+
+    func testCapturedTargetKeepsProcessAndAmbiguousClassification() {
+        let target = TextInjector.Target(
+            processIdentifier: 123,
+            applicationName: "Codex",
+            classification: .ambiguous
+        )
+        XCTAssertEqual(target.processIdentifier, 123)
+        XCTAssertEqual(target.applicationName, "Codex")
+        XCTAssertEqual(target.classification, .ambiguous)
     }
 
     private func evidence(
