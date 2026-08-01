@@ -202,6 +202,11 @@ final class HotkeyMonitor {
             && flags.intersection(supportedModifiers) == shortcut.modifiers
     }
 
+    static func isParrotGeneratedEvent(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData)
+            == TextInjector.generatedEventMarker
+    }
+
     private static let supportedModifiers: CGEventFlags = [
         .maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn,
     ]
@@ -218,6 +223,12 @@ private func hotkeyCallback(
 
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         monitor.reenableTap()
+        return Unmanaged.passUnretained(event)
+    }
+
+    // Delivery uses synthetic Unicode or Command-V events. Never interpret
+    // those as a user hotkey, even if the configured shortcut overlaps.
+    if HotkeyMonitor.isParrotGeneratedEvent(event) {
         return Unmanaged.passUnretained(event)
     }
 

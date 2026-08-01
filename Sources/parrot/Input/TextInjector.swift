@@ -3,15 +3,23 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// Posts a string of text at the current cursor location by synthesizing
-/// keyboard events with `CGEventKeyboardSetUnicodeString`. Works in nearly
-/// every text field on macOS; some Electron apps and secure password fields
-/// can drop characters (platform constraint).
+/// Delivers transcripts to the application captured at hotkey release. The
+/// primary path stages a clipboard transaction and posts Paste directly to the
+/// target PID; Unicode events remain only as a last-resort clipboard-failure
+/// fallback.
 enum TextInjector {
+    static let generatedEventMarker: Int64 = 0x5041_5252_4F54 // "PARROT"
+
     enum Delivery: Equatable {
-        case inserted
-        case insertedWithClipboardBackup
+        case verifiedInserted
+        case unverifiedWithClipboardBackup
         case copiedToClipboard
+        case deliveryFailed
+    }
+
+    enum DeliveryPlan: Equatable {
+        case clipboardOnly
+        case targetedPaste(pid_t)
     }
 
     struct Target: Equatable, Sendable {
@@ -20,37 +28,69 @@ enum TextInjector {
         let classification: TextTargetClassification
     }
 
-    /// Insert into the focused text element. Native controls expose writable
-    /// attributes, while Electron/WebKit editors often expose only a semantic
-    /// text role. Opaque custom editors get an insertion attempt; only a
-    /// positively identified non-text control uses the clipboard fallback.
-    static func deliver(_ text: String, to target: Target?) -> Delivery {
-        guard let target,
-              NSRunningApplication(processIdentifier: target.processIdentifier) != nil
+    /// Transactional delivery: stage the transcript on the clipboard, target
+    /// Paste directly to the application captured at hotkey release, and only
+    /// restore the previous clipboard after Accessibility verifies insertion.
+    @MainActor
+    static func deliver(
+        _ text: String,
+        to target: Target?,
+        verificationSnapshot: FocusedTextSnapshot?
+    ) async -> Delivery {
+        let pasteboard = NSPasteboard.general
+        let previousClipboard = PasteboardSnapshot(pasteboard: pasteboard)
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            if let target {
+                inject(text, processIdentifier: target.processIdentifier)
+            }
+            return .deliveryFailed
+        }
+        let transcriptChangeCount = pasteboard.changeCount
+
+        let targetIsRunning = target.map {
+            NSRunningApplication(processIdentifier: $0.processIdentifier) != nil
+        } ?? false
+        let plan = deliveryPlan(for: target, targetIsRunning: targetIsRunning)
+        guard case let .targetedPaste(processIdentifier) = plan,
+              let target
         else {
-            copyToClipboard(text)
             return .copiedToClipboard
         }
 
-        switch target.classification {
-        case .knownNonText:
-            copyToClipboard(text)
-            return .copiedToClipboard
-        case .knownText:
-            inject(text, processIdentifier: target.processIdentifier)
-            return .inserted
-        case .ambiguous:
-            // Opaque custom editors cannot be verified after delivery. Keep a
-            // recoverable copy while still sending directly to the application.
-            copyToClipboard(text)
+        postPaste(processIdentifier: processIdentifier)
+
+        guard let verificationSnapshot else {
             NSLog(
-                "Parrot: opaque target %@[%d]; inserting with clipboard backup",
+                "Parrot: %@[%d] is opaque; retained clipboard backup",
                 target.applicationName,
                 target.processIdentifier
             )
-            inject(text, processIdentifier: target.processIdentifier)
-            return .insertedWithClipboardBackup
+            return .unverifiedWithClipboardBackup
         }
+
+        // Event delivery is asynchronous. Poll briefly instead of trusting a
+        // fixed delay, then restore the old clipboard only on exact evidence.
+        for _ in 0..<6 {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            if TextDeliveryVerifier.matches(
+                transcript: text,
+                observed: verificationSnapshot.deliveredInsertedText()
+            ) {
+                _ = previousClipboard.restore(
+                    to: pasteboard,
+                    ifUnchangedSince: transcriptChangeCount
+                )
+                return .verifiedInserted
+            }
+        }
+
+        NSLog(
+            "Parrot: could not verify delivery to %@[%d]; retained clipboard backup",
+            target.applicationName,
+            target.processIdentifier
+        )
+        return .unverifiedWithClipboardBackup
     }
 
     static func captureTarget() -> Target? {
@@ -62,8 +102,21 @@ enum TextInjector {
         return Target(
             processIdentifier: application.processIdentifier,
             applicationName: application.localizedName ?? application.bundleIdentifier ?? "app",
-            classification: focusedTargetClassification()
+            classification: focusedTargetClassification(
+                expectedProcessIdentifier: application.processIdentifier
+            )
         )
+    }
+
+    static func deliveryPlan(
+        for target: Target?,
+        targetIsRunning: Bool
+    ) -> DeliveryPlan {
+        guard let target,
+              targetIsRunning,
+              target.classification != .knownNonText
+        else { return .clipboardOnly }
+        return .targetedPaste(target.processIdentifier)
     }
 
     /// Inject the given text at the current cursor location.
@@ -84,7 +137,9 @@ enum TextInjector {
         }
     }
 
-    private static func focusedTargetClassification() -> TextTargetClassification {
+    private static func focusedTargetClassification(
+        expectedProcessIdentifier: pid_t
+    ) -> TextTargetClassification {
         let system = AXUIElementCreateSystemWide()
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -99,6 +154,16 @@ enum TextInjector {
         }
 
         var element = unsafeBitCast(raw, to: AXUIElement.self)
+        var focusedProcessIdentifier: pid_t = 0
+        AXUIElementGetPid(element, &focusedProcessIdentifier)
+        guard focusedProcessIdentifier == expectedProcessIdentifier else {
+            NSLog(
+                "Parrot: frontmost PID %d differs from focused AX PID %d; treating target as opaque",
+                expectedProcessIdentifier,
+                focusedProcessIdentifier
+            )
+            return .ambiguous
+        }
         var inspectedRoles: [String] = []
         var focusedClassification = TextTargetClassification.ambiguous
         for depth in 0..<6 {
@@ -218,6 +283,7 @@ enum TextInjector {
 
         let source = CGEventSource(stateID: .combinedSessionState)
         let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+        down?.setIntegerValueField(.eventSourceUserData, value: generatedEventMarker)
         down?.keyboardSetUnicodeString(stringLength: length, unicodeString: &chunk)
         if let processIdentifier {
             down?.postToPid(processIdentifier)
@@ -226,6 +292,7 @@ enum TextInjector {
         }
 
         let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+        up?.setIntegerValueField(.eventSourceUserData, value: generatedEventMarker)
         up?.keyboardSetUnicodeString(stringLength: length, unicodeString: &chunk)
         if let processIdentifier {
             up?.postToPid(processIdentifier)
@@ -234,10 +301,36 @@ enum TextInjector {
         }
     }
 
-    private static func copyToClipboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+    private static func postPaste(processIdentifier: pid_t) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 9,
+            keyDown: true
+        )
+        down?.setIntegerValueField(.eventSourceUserData, value: generatedEventMarker)
+        down?.flags = .maskCommand
+        down?.postToPid(processIdentifier)
+
+        let up = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 9,
+            keyDown: false
+        )
+        up?.setIntegerValueField(.eventSourceUserData, value: generatedEventMarker)
+        up?.flags = .maskCommand
+        up?.postToPid(processIdentifier)
+    }
+}
+
+enum TextDeliveryVerifier {
+    static func matches(transcript: String, observed: String?) -> Bool {
+        guard let observed else { return false }
+        return normalized(observed) == normalized(transcript)
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.precomposedStringWithCanonicalMapping
     }
 }
 

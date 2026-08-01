@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import XCTest
 @testable import parrot
@@ -70,6 +71,101 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(target.processIdentifier, 123)
         XCTAssertEqual(target.applicationName, "Codex")
         XCTAssertEqual(target.classification, .ambiguous)
+    }
+
+    func testDeliveryPlanTargetsOnlyRunningTextOrOpaqueApplications() {
+        let opaque = TextInjector.Target(
+            processIdentifier: 123,
+            applicationName: "Codex",
+            classification: .ambiguous
+        )
+        let text = TextInjector.Target(
+            processIdentifier: 456,
+            applicationName: "Chrome",
+            classification: .knownText
+        )
+        let button = TextInjector.Target(
+            processIdentifier: 789,
+            applicationName: "Finder",
+            classification: .knownNonText
+        )
+
+        XCTAssertEqual(
+            TextInjector.deliveryPlan(for: opaque, targetIsRunning: true),
+            .targetedPaste(123)
+        )
+        XCTAssertEqual(
+            TextInjector.deliveryPlan(for: text, targetIsRunning: true),
+            .targetedPaste(456)
+        )
+        XCTAssertEqual(
+            TextInjector.deliveryPlan(for: button, targetIsRunning: true),
+            .clipboardOnly
+        )
+        XCTAssertEqual(
+            TextInjector.deliveryPlan(for: opaque, targetIsRunning: false),
+            .clipboardOnly
+        )
+        XCTAssertEqual(
+            TextInjector.deliveryPlan(for: nil, targetIsRunning: false),
+            .clipboardOnly
+        )
+    }
+
+    func testDeliveryVerificationRequiresExactTextButNormalizesUnicode() {
+        XCTAssertTrue(
+            TextDeliveryVerifier.matches(
+                transcript: "Café",
+                observed: "Cafe\u{301}"
+            )
+        )
+        XCTAssertFalse(
+            TextDeliveryVerifier.matches(
+                transcript: "complete transcript",
+                observed: "complete"
+            )
+        )
+        XCTAssertFalse(
+            TextDeliveryVerifier.matches(
+                transcript: "complete transcript",
+                observed: nil
+            )
+        )
+    }
+
+    func testPasteboardSnapshotRestoresOnlyWhenBackupIsStillCurrent() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("parrot-test-\(UUID().uuidString)")
+        )
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("original", forType: .string)
+        let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
+
+        pasteboard.clearContents()
+        pasteboard.setString("transcript", forType: .string)
+        let transcriptChangeCount = pasteboard.changeCount
+        XCTAssertTrue(
+            snapshot.restore(
+                to: pasteboard,
+                ifUnchangedSince: transcriptChangeCount
+            )
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+
+        let secondSnapshot = PasteboardSnapshot(pasteboard: pasteboard)
+        pasteboard.clearContents()
+        pasteboard.setString("another transcript", forType: .string)
+        let secondTranscriptChangeCount = pasteboard.changeCount
+        pasteboard.clearContents()
+        pasteboard.setString("new user copy", forType: .string)
+        XCTAssertFalse(
+            secondSnapshot.restore(
+                to: pasteboard,
+                ifUnchangedSince: secondTranscriptChangeCount
+            )
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "new user copy")
     }
 
     private func evidence(

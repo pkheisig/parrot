@@ -98,4 +98,16 @@ final class HotkeyMonitorTests: XCTestCase {
             monitor.interceptLearning(type: .keyDown, event: wrongModifiers)
         )
     }
+
+    func testGeneratedDeliveryEventsCannotRetriggerHotkeys() throws {
+        let event = try XCTUnwrap(
+            CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true)
+        )
+        XCTAssertFalse(HotkeyMonitor.isParrotGeneratedEvent(event))
+        event.setIntegerValueField(
+            .eventSourceUserData,
+            value: TextInjector.generatedEventMarker
+        )
+        XCTAssertTrue(HotkeyMonitor.isParrotGeneratedEvent(event))
+    }
 }

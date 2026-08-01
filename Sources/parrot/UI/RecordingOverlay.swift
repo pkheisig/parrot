@@ -10,6 +10,7 @@ final class RecordingOverlay {
         case recording
         case transcribing
         case copiedToClipboard
+        case deliveryFailed
     }
 
     private var window: NSPanel?
@@ -27,7 +28,11 @@ final class RecordingOverlay {
             model.resetLevels()
         }
         guard let window else { return }
-        let width: CGFloat = state == .copiedToClipboard ? 178 : 96
+        let width: CGFloat = switch state {
+        case .copiedToClipboard: 178
+        case .deliveryFailed: 194
+        default: 96
+        }
         if window.frame.width != width {
             window.setContentSize(NSSize(width: width, height: 44))
             positionAtBottomCenter(window)
@@ -64,6 +69,15 @@ final class RecordingOverlay {
 
     func showCopiedToClipboard() {
         show(.copiedToClipboard)
+        scheduleStatusHide()
+    }
+
+    func showDeliveryFailure() {
+        show(.deliveryFailed)
+        scheduleStatusHide()
+    }
+
+    private func scheduleStatusHide() {
         let work = DispatchWorkItem { [weak self] in
             self?.hide()
         }
@@ -178,6 +192,16 @@ private struct OverlayPill: View {
                     .lineLimit(1)
             }
             .foregroundStyle(Color(red: 181/255.0, green: 209/255.0, blue: 255/255.0))
+            .frame(height: 22)
+        case .deliveryFailed:
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Couldn’t deliver transcript")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(Color(red: 255/255.0, green: 184/255.0, blue: 148/255.0))
             .frame(height: 22)
         }
     }

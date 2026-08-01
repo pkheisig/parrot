@@ -118,6 +118,10 @@ struct FocusedTextSnapshot: Sendable {
     private let suffix: String
     private let originalLocation: Int
 
+    func belongs(to processIdentifier: pid_t) -> Bool {
+        self.processIdentifier == processIdentifier
+    }
+
     static func capture() -> FocusedTextSnapshot? {
         guard let element = focusedElement(),
               let value = stringValue(of: element),
@@ -150,9 +154,19 @@ struct FocusedTextSnapshot: Sendable {
         guard let focused = Self.focusedElement() else { return nil }
         var currentPID: pid_t = 0
         AXUIElementGetPid(focused, &currentPID)
-        guard currentPID == processIdentifier,
-              let value = Self.stringValue(of: focused)
-        else { return nil }
+        guard currentPID == processIdentifier else { return nil }
+        return insertedText(in: focused)
+    }
+
+    /// Delivery verification follows the application captured at hotkey
+    /// release even if global focus moves while transcription is running.
+    func deliveredInsertedText() -> String? {
+        guard let focused = Self.focusedElement(for: processIdentifier) else { return nil }
+        return insertedText(in: focused)
+    }
+
+    private func insertedText(in focused: AXUIElement) -> String? {
+        guard let value = Self.stringValue(of: focused) else { return nil }
 
         let string = value as NSString
         let start: Int
@@ -224,6 +238,22 @@ struct FocusedTextSnapshot: Sendable {
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             system,
+            kAXFocusedUIElementAttribute as CFString,
+            &raw
+        ) == .success,
+              let raw
+        else { return nil }
+        return unsafeBitCast(raw, to: AXUIElement.self)
+    }
+
+    /// Resolve the application's own first responder rather than the global
+    /// focus. This remains stable if the user changes apps while transcription
+    /// is running and lets delivery verification inspect the captured target.
+    private static func focusedElement(for processIdentifier: pid_t) -> AXUIElement? {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
             kAXFocusedUIElementAttribute as CFString,
             &raw
         ) == .success,
@@ -509,7 +539,7 @@ private enum ClipboardTextCapture {
     }
 }
 
-private struct PasteboardSnapshot {
+struct PasteboardSnapshot {
     private let items: [[NSPasteboard.PasteboardType: Data]]
 
     init(pasteboard: NSPasteboard) {
@@ -520,9 +550,17 @@ private struct PasteboardSnapshot {
         }
     }
 
-    func restore(to pasteboard: NSPasteboard) {
+    @discardableResult
+    func restore(
+        to pasteboard: NSPasteboard,
+        ifUnchangedSince expectedChangeCount: Int? = nil
+    ) -> Bool {
+        if let expectedChangeCount,
+           pasteboard.changeCount != expectedChangeCount {
+            return false
+        }
         pasteboard.clearContents()
-        guard !items.isEmpty else { return }
+        guard !items.isEmpty else { return true }
         let restored = items.map { values in
             let item = NSPasteboardItem()
             for (type, data) in values {
@@ -531,5 +569,6 @@ private struct PasteboardSnapshot {
             return item
         }
         pasteboard.writeObjects(restored)
+        return true
     }
 }

@@ -468,16 +468,14 @@ private func transcribe(
             FileHandle.standardError.write(Data(
                 String(format: "→ %.2fs · %@\n", elapsed, text).utf8
             ))
-            await MainActor.run {
-                deliverTranscript(
-                    text,
-                    overlay: overlay,
-                    menuBar: menuBar,
-                    learningController: learningController,
-                    deliveryTarget: deliveryTarget,
-                    deliverySnapshot: deliverySnapshot
-                )
-            }
+            await deliverTranscript(
+                text,
+                overlay: overlay,
+                menuBar: menuBar,
+                learningController: learningController,
+                deliveryTarget: deliveryTarget,
+                deliverySnapshot: deliverySnapshot
+            )
         } catch {
             FileHandle.standardError.write(Data("transcription failed: \(error)\n".utf8))
             await MainActor.run {
@@ -524,21 +522,21 @@ private func finishBufferedTranscription(
                 FileHandle.standardError.write(Data("  wrote \(path)\n".utf8))
             }
             FileHandle.standardError.write(Data("→ \(result.text)\n".utf8))
-            await MainActor.run {
-                guard !result.text.isEmpty else {
+            guard !result.text.isEmpty else {
+                await MainActor.run {
                     overlay?.hide()
                     menuBar?.setRecording(false)
-                    return
                 }
-                deliverTranscript(
-                    result.text,
-                    overlay: overlay,
-                    menuBar: menuBar,
-                    learningController: learningController,
-                    deliveryTarget: deliveryTarget,
-                    deliverySnapshot: deliverySnapshot
-                )
+                return
             }
+            await deliverTranscript(
+                result.text,
+                overlay: overlay,
+                menuBar: menuBar,
+                learningController: learningController,
+                deliveryTarget: deliveryTarget,
+                deliverySnapshot: deliverySnapshot
+            )
         } catch {
             FileHandle.standardError.write(Data(
                 "buffered transcription failed: \(error)\n".utf8
@@ -560,24 +558,35 @@ private func deliverTranscript(
     learningController: CorrectionLearningController,
     deliveryTarget: TextInjector.Target?,
     deliverySnapshot: FocusedTextSnapshot?
-) {
+) async {
     guard !text.isEmpty else {
         overlay?.hide()
         menuBar?.setRecording(false)
         return
     }
-    let snapshot = deliverySnapshot ?? FocusedTextSnapshot.capture()
     let target = deliveryTarget ?? TextInjector.captureTarget()
-    let delivery = TextInjector.deliver(text, to: target)
+    let candidateSnapshot = deliverySnapshot ?? FocusedTextSnapshot.capture()
+    let snapshot: FocusedTextSnapshot?
+    if let target,
+       candidateSnapshot?.belongs(to: target.processIdentifier) == true {
+        snapshot = candidateSnapshot
+    } else {
+        snapshot = nil
+    }
+    let delivery = await TextInjector.deliver(
+        text,
+        to: target,
+        verificationSnapshot: snapshot
+    )
     learningController.remember(insertedText: text, snapshot: snapshot)
     menuBar?.setRecording(false)
 
     switch delivery {
-    case .inserted:
+    case .verifiedInserted:
         overlay?.hide()
-    case .insertedWithClipboardBackup:
+    case .unverifiedWithClipboardBackup:
         FileHandle.standardError.write(Data(
-            "opaque text target · inserted with clipboard backup\n".utf8
+            "delivery unverified · clipboard backup retained\n".utf8
         ))
         overlay?.showCopiedToClipboard()
         menuBar?.setCopiedToClipboard()
@@ -587,6 +596,12 @@ private func deliverTranscript(
         ))
         overlay?.showCopiedToClipboard()
         menuBar?.setCopiedToClipboard()
+    case .deliveryFailed:
+        FileHandle.standardError.write(Data(
+            "delivery failed · clipboard unavailable\n".utf8
+        ))
+        overlay?.showDeliveryFailure()
+        menuBar?.setDeliveryFailure()
     }
 }
 

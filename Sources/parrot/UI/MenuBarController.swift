@@ -124,6 +124,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         contentController.setState("copied to clipboard")
     }
 
+    func setDeliveryFailure() {
+        contentController.setState("couldn’t deliver transcript")
+    }
+
     func setUnavailable(_ message: String) {
         contentController.setState(message)
     }

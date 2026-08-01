@@ -43,8 +43,10 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
    controls copy the transcript to the clipboard and show a brief
    **Copied to clipboard** pill instead of sending keystrokes to the wrong place.
    The destination application is captured when recording stops, so a delayed
-   transcript cannot be redirected by Cmd-Tab or overlay focus. Opaque editors
-   receive direct application-targeted input plus a clipboard safety copy.
+   transcript cannot be redirected by Cmd-Tab or overlay focus. Parrot stages a
+   clipboard backup and sends Paste directly to that application. It restores
+   the previous clipboard only after readable fields confirm the exact inserted
+   text; opaque or failed deliveries retain the transcript and show the pill.
 
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
 
