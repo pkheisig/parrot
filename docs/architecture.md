@@ -143,9 +143,12 @@ Delivery is transactional: Parrot snapshots the existing clipboard, stages the
 transcript, and posts Command-V directly to the captured PID rather than global
 session focus. Readable fields are polled for the exact inserted span. Focused
 opaque editor surfaces restore the prior clipboard after the paste-consumption
-window even when they hide their content from Accessibility. Unknown, non-text,
-and failed destinations retain the transcript and show the clipboard pill. A
-newer user clipboard value is never overwritten during restoration.
+window even when they hide their content from Accessibility. For completely
+opaque applications, the staged string uses a lazy pasteboard provider as a
+consumption receipt: requesting the string through Paste proves delivery and
+restores the prior clipboard. Unconsumed, non-text, and failed destinations
+retain the transcript and show the clipboard pill. A newer user clipboard value
+is never overwritten during restoration.
 
 Before injection, `FocusedTextSnapshot` records the focused Accessibility text
 element, insertion range, and short surrounding anchors. Pressing the Learn

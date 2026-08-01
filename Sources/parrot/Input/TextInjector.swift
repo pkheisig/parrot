@@ -21,6 +21,16 @@ enum TextInjector {
         case unverifiedWithClipboardBackup
         case copiedToClipboard
         case deliveryFailed
+
+        var testDescription: String {
+            switch self {
+            case .verifiedInserted: "verified-inserted"
+            case .insertedIntoTextTarget: "consumed-and-inserted"
+            case .unverifiedWithClipboardBackup: "unverified-clipboard-retained"
+            case .copiedToClipboard: "clipboard-only"
+            case .deliveryFailed: "delivery-failed"
+            }
+        }
     }
 
     enum DeliveryPlan: Equatable {
@@ -45,8 +55,9 @@ enum TextInjector {
     ) async -> Delivery {
         let pasteboard = NSPasteboard.general
         let previousClipboard = PasteboardSnapshot(pasteboard: pasteboard)
+        let stagedTranscript = PasteboardTranscript(text: text)
         pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else {
+        guard pasteboard.writeObjects([stagedTranscript.item]) else {
             if let target {
                 inject(text, processIdentifier: target.processIdentifier)
             }
@@ -61,6 +72,7 @@ enum TextInjector {
         guard case let .targetedPaste(processIdentifier) = plan,
               let target
         else {
+            stagedTranscript.materialize()
             return .copiedToClipboard
         }
 
@@ -103,6 +115,24 @@ enum TextInjector {
             return .insertedIntoTextTarget
         }
 
+        // Accessibility-opaque editors such as Codex cannot expose their
+        // focused value or even a stable editor role. A lazy pasteboard data
+        // provider gives us a direct receipt when their Paste handler requests
+        // the transcript. That is stronger evidence than application identity
+        // or timing and avoids retaining a redundant clipboard copy.
+        if stagedTranscript.wasConsumed {
+            let restored = previousClipboard.restore(
+                to: pasteboard,
+                ifUnchangedSince: transcriptChangeCount,
+                orStillContaining: text
+            )
+            logger.notice(
+                "Unknown target consumed staged transcript; clipboard restored: \(restored, privacy: .public)"
+            )
+            return .insertedIntoTextTarget
+        }
+
+        stagedTranscript.materialize()
         logger.notice("Unknown target; transcript retained on clipboard")
         NSLog(
             "Parrot: could not verify delivery to %@[%d]; retained clipboard backup",
@@ -349,6 +379,44 @@ enum TextInjector {
         up?.setIntegerValueField(.eventSourceUserData, value: generatedEventMarker)
         up?.flags = .maskCommand
         up?.postToPid(processIdentifier)
+    }
+}
+
+/// A lazy pasteboard item that records whether the destination's Paste handler
+/// actually requested the staged transcript. Materializing before a clipboard
+/// fallback keeps the string self-contained after the delivery call returns.
+final class PasteboardTranscript: NSObject, NSPasteboardItemDataProvider {
+    let item = NSPasteboardItem()
+
+    private let text: String
+    private let lock = NSLock()
+    private var consumed = false
+
+    init(text: String) {
+        self.text = text
+        super.init()
+        item.setDataProvider(self, forTypes: [.string])
+    }
+
+    var wasConsumed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return consumed
+    }
+
+    func pasteboard(
+        _ pasteboard: NSPasteboard?,
+        item: NSPasteboardItem,
+        provideDataForType type: NSPasteboard.PasteboardType
+    ) {
+        lock.lock()
+        consumed = true
+        lock.unlock()
+        item.setString(text, forType: type)
+    }
+
+    func materialize() {
+        item.setString(text, forType: .string)
     }
 }
 

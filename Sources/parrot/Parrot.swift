@@ -5,16 +5,54 @@ import Foundation
 import WhisperKit
 
 @main
-struct Parrot: ParsableCommand {
+struct Parrot: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "parrot",
         abstract: "Minimal macOS dictation daemon with a configurable global hotkey.",
         subcommands: [
             Run.self, Setup.self, Doctor.self, Models.self, Install.self,
-            TranscribeFile.self,
+            TranscribeFile.self, DeliverTest.self,
         ],
         defaultSubcommand: Run.self
     )
+}
+
+/// Internal end-to-end delivery probe used by the local UI test harness. It
+/// deliberately bypasses audio and model inference while exercising the exact
+/// production target capture and TextInjector transaction.
+struct DeliverTest: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "deliver-test",
+        abstract: "Deliver fixed text to the focused application for UI verification."
+    )
+
+    @Argument(help: "Text to deliver to the focused application.")
+    var text: String
+
+    @MainActor
+    mutating func run() async throws {
+        let target = TextInjector.captureTarget()
+        if let target {
+            print(
+                "target=\(target.applicationName)[\(target.processIdentifier)] "
+                    + "classification=\(target.classification.logLabel)"
+            )
+        } else {
+            print("target=none")
+        }
+        let candidateSnapshot = FocusedTextSnapshot.capture()
+        let snapshot = target.flatMap { target in
+            candidateSnapshot?.belongs(to: target.processIdentifier) == true
+                ? candidateSnapshot
+                : nil
+        }
+        let delivery = await TextInjector.deliver(
+            text,
+            to: target,
+            verificationSnapshot: snapshot
+        )
+        print(delivery.testDescription)
+    }
 }
 
 struct Run: ParsableCommand {

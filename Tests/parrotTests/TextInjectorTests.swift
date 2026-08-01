@@ -217,6 +217,35 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), "new user copy")
     }
 
+    func testLazyTranscriptRecordsActualPasteboardConsumption() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("parrot-consumption-test-\(UUID().uuidString)")
+        )
+        defer { pasteboard.releaseGlobally() }
+        let transcript = PasteboardTranscript(text: "consumed transcript")
+
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([transcript.item]))
+        XCTAssertFalse(transcript.wasConsumed)
+
+        XCTAssertEqual(pasteboard.string(forType: .string), "consumed transcript")
+        XCTAssertTrue(transcript.wasConsumed)
+    }
+
+    func testMaterializedTranscriptRemainsAvailableWithoutConsumption() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("parrot-materialize-test-\(UUID().uuidString)")
+        )
+        defer { pasteboard.releaseGlobally() }
+        let transcript = PasteboardTranscript(text: "fallback transcript")
+
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([transcript.item]))
+        transcript.materialize()
+
+        XCTAssertEqual(pasteboard.string(forType: .string), "fallback transcript")
+    }
+
     private func evidence(
         role: String? = nil,
         description: String? = nil,
