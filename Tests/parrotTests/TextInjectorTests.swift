@@ -11,7 +11,7 @@ final class TextInjectorTests: XCTestCase {
         )
     }
 
-    func testTreatsOpaqueCustomEditorAsAmbiguousInsteadOfNonText() {
+    func testClassifierLeavesGenericCustomEditorAmbiguousUntilFocusInspection() {
         XCTAssertEqual(
             TextDestinationClassifier.classify(evidence(role: kAXGroupRole)),
             .ambiguous
@@ -73,6 +73,31 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(target.classification, .ambiguous)
     }
 
+    func testFocusedTextClassificationsRestoreClipboardAfterTargetedPaste() {
+        XCTAssertTrue(TextTargetClassification.knownText.restoresClipboardAfterTargetedPaste)
+        XCTAssertTrue(TextTargetClassification.opaqueText.restoresClipboardAfterTargetedPaste)
+        XCTAssertFalse(
+            TextTargetClassification.knownNonText.restoresClipboardAfterTargetedPaste
+        )
+        XCTAssertFalse(TextTargetClassification.ambiguous.restoresClipboardAfterTargetedPaste)
+    }
+
+    func testSplitProcessEditorKeepsFocusedAccessibilityEvidence() {
+        XCTAssertEqual(
+            TextInjector.focusedChainClassification([.ambiguous, .knownText]),
+            .knownText
+        )
+        XCTAssertEqual(
+            TextInjector.focusedChainClassification([.ambiguous, .knownNonText]),
+            .opaqueText
+        )
+        XCTAssertEqual(
+            TextInjector.focusedChainClassification([.knownNonText, .knownNonText]),
+            .knownNonText
+        )
+        XCTAssertEqual(TextInjector.focusedChainClassification([]), .ambiguous)
+    }
+
     func testDeliveryPlanTargetsOnlyRunningTextOrOpaqueApplications() {
         let opaque = TextInjector.Target(
             processIdentifier: 123,
@@ -83,6 +108,11 @@ final class TextInjectorTests: XCTestCase {
             processIdentifier: 456,
             applicationName: "Chrome",
             classification: .knownText
+        )
+        let opaqueText = TextInjector.Target(
+            processIdentifier: 654,
+            applicationName: "Word",
+            classification: .opaqueText
         )
         let button = TextInjector.Target(
             processIdentifier: 789,
@@ -97,6 +127,10 @@ final class TextInjectorTests: XCTestCase {
         XCTAssertEqual(
             TextInjector.deliveryPlan(for: text, targetIsRunning: true),
             .targetedPaste(456)
+        )
+        XCTAssertEqual(
+            TextInjector.deliveryPlan(for: opaqueText, targetIsRunning: true),
+            .targetedPaste(654)
         )
         XCTAssertEqual(
             TextInjector.deliveryPlan(for: button, targetIsRunning: true),
@@ -149,6 +183,21 @@ final class TextInjectorTests: XCTestCase {
             snapshot.restore(
                 to: pasteboard,
                 ifUnchangedSince: transcriptChangeCount
+            )
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+
+        let rewrittenSnapshot = PasteboardSnapshot(pasteboard: pasteboard)
+        pasteboard.clearContents()
+        pasteboard.setString("transcript", forType: .string)
+        let rewrittenChangeCount = pasteboard.changeCount
+        pasteboard.clearContents()
+        pasteboard.setString("transcript", forType: .string)
+        XCTAssertTrue(
+            rewrittenSnapshot.restore(
+                to: pasteboard,
+                ifUnchangedSince: rewrittenChangeCount,
+                orStillContaining: "transcript"
             )
         )
         XCTAssertEqual(pasteboard.string(forType: .string), "original")

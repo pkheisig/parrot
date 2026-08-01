@@ -553,11 +553,16 @@ struct PasteboardSnapshot {
     @discardableResult
     func restore(
         to pasteboard: NSPasteboard,
-        ifUnchangedSince expectedChangeCount: Int? = nil
+        ifUnchangedSince expectedChangeCount: Int? = nil,
+        orStillContaining expectedString: String? = nil
     ) -> Bool {
         if let expectedChangeCount,
            pasteboard.changeCount != expectedChangeCount {
-            return false
+            guard let expectedString,
+                  pasteboard.string(forType: .string)?
+                    .precomposedStringWithCanonicalMapping
+                    == expectedString.precomposedStringWithCanonicalMapping
+            else { return false }
         }
         pasteboard.clearContents()
         guard !items.isEmpty else { return true }

@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import OSLog
 
 /// Delivers transcripts to the application captured at hotkey release. The
 /// primary path stages a clipboard transaction and posts Paste directly to the
@@ -9,9 +10,14 @@ import Foundation
 /// fallback.
 enum TextInjector {
     static let generatedEventMarker: Int64 = 0x5041_5252_4F54 // "PARROT"
+    private static let logger = Logger(
+        subsystem: "com.pkheisig.parrot",
+        category: "delivery"
+    )
 
     enum Delivery: Equatable {
         case verifiedInserted
+        case insertedIntoTextTarget
         case unverifiedWithClipboardBackup
         case copiedToClipboard
         case deliveryFailed
@@ -60,31 +66,44 @@ enum TextInjector {
 
         postPaste(processIdentifier: processIdentifier)
 
-        guard let verificationSnapshot else {
-            NSLog(
-                "Parrot: %@[%d] is opaque; retained clipboard backup",
-                target.applicationName,
-                target.processIdentifier
-            )
-            return .unverifiedWithClipboardBackup
-        }
-
         // Event delivery is asynchronous. Poll briefly instead of trusting a
         // fixed delay, then restore the old clipboard only on exact evidence.
         for _ in 0..<6 {
             try? await Task.sleep(nanoseconds: 40_000_000)
-            if TextDeliveryVerifier.matches(
+            if let verificationSnapshot,
+               TextDeliveryVerifier.matches(
                 transcript: text,
                 observed: verificationSnapshot.deliveredInsertedText()
             ) {
-                _ = previousClipboard.restore(
+                let restored = previousClipboard.restore(
                     to: pasteboard,
-                    ifUnchangedSince: transcriptChangeCount
+                    ifUnchangedSince: transcriptChangeCount,
+                    orStillContaining: text
+                )
+                logger.notice(
+                    "Exact insertion verified; clipboard restored: \(restored, privacy: .public)"
                 )
                 return .verifiedInserted
             }
         }
 
+        // Some Electron and document editors expose a focused text surface but
+        // deliberately hide its value from Accessibility. The focused text
+        // classification is still positive destination evidence, so do not
+        // turn the temporary pasteboard staging value into a permanent copy.
+        if target.classification.restoresClipboardAfterTargetedPaste {
+            let restored = previousClipboard.restore(
+                to: pasteboard,
+                ifUnchangedSince: transcriptChangeCount,
+                orStillContaining: text
+            )
+            logger.notice(
+                "Focused \(target.classification.logLabel, privacy: .public) target; clipboard restored: \(restored, privacy: .public)"
+            )
+            return .insertedIntoTextTarget
+        }
+
+        logger.notice("Unknown target; transcript retained on clipboard")
         NSLog(
             "Parrot: could not verify delivery to %@[%d]; retained clipboard backup",
             target.applicationName,
@@ -156,33 +175,32 @@ enum TextInjector {
         var element = unsafeBitCast(raw, to: AXUIElement.self)
         var focusedProcessIdentifier: pid_t = 0
         AXUIElementGetPid(element, &focusedProcessIdentifier)
-        guard focusedProcessIdentifier == expectedProcessIdentifier else {
+        if focusedProcessIdentifier != expectedProcessIdentifier {
             NSLog(
-                "Parrot: frontmost PID %d differs from focused AX PID %d; treating target as opaque",
+                "Parrot: frontmost PID %d differs from focused AX PID %d; inspecting focused AX roles",
                 expectedProcessIdentifier,
                 focusedProcessIdentifier
             )
-            return .ambiguous
         }
-        var inspectedRoles: [String] = []
-        var focusedClassification = TextTargetClassification.ambiguous
-        for depth in 0..<6 {
+        var evidenceChain: [(role: String, classification: TextTargetClassification)] = []
+        for _ in 0..<6 {
             let evidence = destinationEvidence(for: element)
-            inspectedRoles.append(evidence.role ?? "unknown")
             let classification = TextDestinationClassifier.classify(evidence)
-            if depth == 0 {
-                focusedClassification = classification
-            }
-            if classification == .knownText {
-                return .knownText
-            }
+            evidenceChain.append((evidence.role ?? "unknown", classification))
             guard let parent = elementAttribute(
                 element,
                 name: kAXParentAttribute
             ) else { break }
             element = parent
         }
-        if focusedClassification == .knownNonText {
+        let classification = focusedChainClassification(
+            evidenceChain.map(\.classification)
+        )
+        let inspectedRoles = evidenceChain.map(\.role)
+        if classification == .knownText {
+            return .knownText
+        }
+        if classification == .knownNonText {
             NSLog(
                 "Parrot: non-text Accessibility target: %@",
                 inspectedRoles.joined(separator: " > ")
@@ -190,10 +208,21 @@ enum TextInjector {
             return .knownNonText
         }
         NSLog(
-            "Parrot: ambiguous Accessibility target: %@",
+            "Parrot: opaque focused text candidate: %@",
             inspectedRoles.joined(separator: " > ")
         )
-        return .ambiguous
+        return .opaqueText
+    }
+
+    /// A renderer/helper PID mismatch is normal in split-process editors such
+    /// as Electron and must not erase the focused element's role evidence.
+    static func focusedChainClassification(
+        _ classifications: [TextTargetClassification]
+    ) -> TextTargetClassification {
+        guard let focused = classifications.first else { return .ambiguous }
+        if classifications.contains(.knownText) { return .knownText }
+        if focused == .knownNonText { return .knownNonText }
+        return .opaqueText
     }
 
     private static func destinationEvidence(
@@ -345,8 +374,22 @@ struct TextDestinationEvidence {
 
 enum TextTargetClassification: Equatable {
     case knownText
+    case opaqueText
     case knownNonText
     case ambiguous
+
+    var restoresClipboardAfterTargetedPaste: Bool {
+        self == .knownText || self == .opaqueText
+    }
+
+    var logLabel: String {
+        switch self {
+        case .knownText: "text"
+        case .opaqueText: "opaque-text"
+        case .knownNonText: "non-text"
+        case .ambiguous: "unknown"
+        }
+    }
 }
 
 enum TextDestinationClassifier {

@@ -582,7 +582,7 @@ private func deliverTranscript(
     menuBar?.setRecording(false)
 
     switch delivery {
-    case .verifiedInserted:
+    case .verifiedInserted, .insertedIntoTextTarget:
         overlay?.hide()
     case .unverifiedWithClipboardBackup:
         FileHandle.standardError.write(Data(

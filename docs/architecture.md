@@ -141,10 +141,11 @@ The target application PID and the readable correction snapshot are captured at
 hotkey release, before asynchronous transcription can change timing or focus.
 Delivery is transactional: Parrot snapshots the existing clipboard, stages the
 transcript, and posts Command-V directly to the captured PID rather than global
-session focus. Readable fields are polled for the exact inserted span; only a
-verified match restores the prior clipboard, and only if the user has not copied
-something newer meanwhile. Opaque and failed deliveries retain the transcript
-and show the clipboard pill, so a rejected event cannot discard the result.
+session focus. Readable fields are polled for the exact inserted span. Focused
+opaque editor surfaces restore the prior clipboard after the paste-consumption
+window even when they hide their content from Accessibility. Unknown, non-text,
+and failed destinations retain the transcript and show the clipboard pill. A
+newer user clipboard value is never overwritten during restoration.
 
 Before injection, `FocusedTextSnapshot` records the focused Accessibility text
 element, insertion range, and short surrounding anchors. Pressing the Learn
