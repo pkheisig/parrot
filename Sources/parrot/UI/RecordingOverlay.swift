@@ -9,17 +9,29 @@ final class RecordingOverlay {
         case hidden
         case recording
         case transcribing
+        case copiedToClipboard
     }
 
     private var window: NSPanel?
     private let model = OverlayModel()
+    private var pendingHide: DispatchWorkItem?
+    private var pendingOrderOut: DispatchWorkItem?
 
     func show(_ state: State) {
+        pendingHide?.cancel()
+        pendingHide = nil
+        pendingOrderOut?.cancel()
+        pendingOrderOut = nil
         ensureWindow()
         if state == .recording {
             model.resetLevels()
         }
         guard let window else { return }
+        let width: CGFloat = state == .copiedToClipboard ? 178 : 96
+        if window.frame.width != width {
+            window.setContentSize(NSSize(width: width, height: 44))
+            positionAtBottomCenter(window)
+        }
         let needsAppear = !window.isVisible
         if needsAppear {
             positionAtBottomCenter(window)
@@ -35,13 +47,28 @@ final class RecordingOverlay {
     }
 
     func hide() {
+        pendingHide?.cancel()
+        pendingHide = nil
+        pendingOrderOut?.cancel()
         model.state = .hidden
         // Let the SwiftUI scale+fade animation play out before yanking the
         // window — otherwise it just pops away.
         let window = self.window
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+        let work = DispatchWorkItem { [weak self, weak window] in
+            guard self?.model.state == .hidden else { return }
             window?.orderOut(nil)
         }
+        pendingOrderOut = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    func showCopiedToClipboard() {
+        show(.copiedToClipboard)
+        let work = DispatchWorkItem { [weak self] in
+            self?.hide()
+        }
+        pendingHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
     }
 
     /// Push a new audio level (0…~1). Safe to call from any thread.
@@ -142,6 +169,16 @@ private struct OverlayPill: View {
                 .controlSize(.small)
                 .scaleEffect(0.8)
                 .frame(width: 54, height: 22)
+        case .copiedToClipboard:
+            HStack(spacing: 7) {
+                Image(systemName: "doc.on.clipboard.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Copied to clipboard")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(Color(red: 181/255.0, green: 209/255.0, blue: 255/255.0))
+            .frame(height: 22)
         }
     }
 }

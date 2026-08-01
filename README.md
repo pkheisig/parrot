@@ -38,7 +38,10 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
    mode, Parrot decodes confirmed segments privately while you are still
    speaking, then reconciles only the unfinished tail on release. Automatic and
    German modes still transcribe the completed recording because routing or the
-   German specialist requires the finished audio.
+   German specialist requires the finished audio. Parrot recognizes native,
+   web, and Electron text editors through writable attributes and semantic text
+   roles. If no text editor is focused, it copies the transcript and shows a brief
+   **Copied to clipboard** pill instead of sending keystrokes to the wrong place.
 
 That's it. There is no record button or "send" button—the configured global shortcut is the recording control.
 

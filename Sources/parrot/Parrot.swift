@@ -445,14 +445,12 @@ private func transcribe(
                 String(format: "→ %.2fs · %@\n", elapsed, text).utf8
             ))
             await MainActor.run {
-                let snapshot = FocusedTextSnapshot.capture()
-                TextInjector.inject(text)
-                learningController.remember(
-                    insertedText: text,
-                    snapshot: snapshot
+                deliverTranscript(
+                    text,
+                    overlay: overlay,
+                    menuBar: menuBar,
+                    learningController: learningController
                 )
-                overlay?.hide()
-                menuBar?.setRecording(false)
             }
         } catch {
             FileHandle.standardError.write(Data("transcription failed: \(error)\n".utf8))
@@ -504,14 +502,12 @@ private func finishBufferedTranscription(
                     menuBar?.setRecording(false)
                     return
                 }
-                let snapshot = FocusedTextSnapshot.capture()
-                TextInjector.inject(result.text)
-                learningController.remember(
-                    insertedText: result.text,
-                    snapshot: snapshot
+                deliverTranscript(
+                    result.text,
+                    overlay: overlay,
+                    menuBar: menuBar,
+                    learningController: learningController
                 )
-                overlay?.hide()
-                menuBar?.setRecording(false)
             }
         } catch {
             FileHandle.standardError.write(Data(
@@ -523,6 +519,35 @@ private func finishBufferedTranscription(
                 menuBar?.setRecording(false)
             }
         }
+    }
+}
+
+@MainActor
+private func deliverTranscript(
+    _ text: String,
+    overlay: RecordingOverlay?,
+    menuBar: MenuBarController?,
+    learningController: CorrectionLearningController
+) {
+    guard !text.isEmpty else {
+        overlay?.hide()
+        menuBar?.setRecording(false)
+        return
+    }
+    let snapshot = FocusedTextSnapshot.capture()
+    let delivery = TextInjector.deliver(text)
+    learningController.remember(insertedText: text, snapshot: snapshot)
+    menuBar?.setRecording(false)
+
+    switch delivery {
+    case .inserted:
+        overlay?.hide()
+    case .copiedToClipboard:
+        FileHandle.standardError.write(Data(
+            "no writable text target · copied transcript to clipboard\n".utf8
+        ))
+        overlay?.showCopiedToClipboard()
+        menuBar?.setCopiedToClipboard()
     }
 }
 

@@ -125,7 +125,14 @@ Adding an engine = one new file conforming to `Transcriber`.
 
 ### `TextInjector`
 
-`CGEventCreateKeyboardEvent` + `CGEventKeyboardSetUnicodeString` — pastes the transcript at the current cursor position. Works in nearly every text field on macOS (some Electron apps and secure fields are flaky; platform constraint).
+Before posting keyboard events, Parrot inspects the focused Accessibility
+element and its parent chain. Native writable attributes, semantic text roles,
+and Chromium contenteditable marker ranges all identify a valid target. This
+handles custom Electron/WebKit editors that do not mark `AXValue` as settable.
+A valid target receives the transcript through `CGEventCreateKeyboardEvent` plus
+`CGEventKeyboardSetUnicodeString`. Without one, Parrot puts the transcript on
+the system clipboard and shows the same overlay capsule in a temporary **Copied
+to clipboard** state rather than typing into an unrelated window.
 
 Before injection, `FocusedTextSnapshot` records the focused Accessibility text
 element, insertion range, and short surrounding anchors. Pressing the Learn

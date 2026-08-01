@@ -120,6 +120,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         contentController.setState("transcribing…")
     }
 
+    func setCopiedToClipboard() {
+        contentController.setState("copied to clipboard")
+    }
+
     func setUnavailable(_ message: String) {
         contentController.setState(message)
     }
