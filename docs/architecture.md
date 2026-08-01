@@ -87,7 +87,12 @@ Global hotkey via `CGEventTap` (requires Accessibility permission). Default: **h
 
 ### `AudioCapture`
 
-`AVAudioEngine` tap on the input node. Streams 16 kHz mono `Float32` buffers into a ring buffer while the hotkey is held. On release, hands the full buffer to the active `Transcriber`.
+`AVAudioEngine` records 16 kHz mono `Float32` audio. Automatic and German modes
+hand the completed buffer to the active transcriber. Fixed English mode uses
+WhisperKit's live audio processor: it confirms segments privately during the
+recording, cancels any stale in-flight whole-buffer pass on release, and
+re-decodes only a short overlap plus the unresolved tail before injection.
+Escape stops either capture path and discards all partial text.
 
 ### `Transcriber` (protocol)
 
@@ -109,6 +114,12 @@ Concrete implementations:
 language from the finished recording, selects the English or German specialist
 only above the confidence threshold, and otherwise transcribes with the
 multilingual detector.
+
+Fixed English mode also owns a buffered streaming lifecycle. This does not paste
+unstable partial text into the focused application: only confirmed segments and
+the reconciled final tail leave the transcriber after hotkey release. The model
+and decoding settings are identical to normal English transcription, so the
+latency optimization does not substitute a smaller checkpoint.
 
 Adding an engine = one new file conforming to `Transcriber`.
 

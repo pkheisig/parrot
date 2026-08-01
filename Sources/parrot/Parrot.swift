@@ -110,6 +110,8 @@ struct Run: ParsableCommand {
         var activationMode = settings.activationMode
         var recordingMode = activationMode
         var isRecording = false
+        var usesBufferedStream = false
+        var bufferedStartTask: Task<Void, Error>?
         let readiness = MainActor.assumeIsolated {
             RuntimeReadiness(modelReady: !isAppBundle)
         }
@@ -155,6 +157,72 @@ struct Run: ParsableCommand {
                 }
                 if recordingMode == .toggle, isRecording {
                     isRecording = false
+                    if usesBufferedStream {
+                        finishBufferedTranscription(
+                            startTask: bufferedStartTask,
+                            transcriptionService: transcriptionService,
+                            overlay: overlay,
+                            menuBar: menuBar,
+                            dumpWav: dumpWav,
+                            learningController: learningController
+                        )
+                    } else {
+                        let samples = capture.stop()
+                        transcribe(
+                            samples: samples,
+                            transcriptionService: transcriptionService,
+                            overlay: overlay,
+                            menuBar: menuBar,
+                            dumpWav: dumpWav,
+                            learningController: learningController
+                        )
+                    }
+                    usesBufferedStream = false
+                    bufferedStartTask = nil
+                    return
+                }
+                guard !isRecording else { return }
+                recordingMode = activationMode
+                usesBufferedStream = model == nil
+                    && settings.transcriptionLanguage == .english
+                if usesBufferedStream {
+                    bufferedStartTask = Task {
+                        try await transcriptionService.startBufferedStream { level in
+                            Task { @MainActor in
+                                overlay?.pushLevel(level)
+                            }
+                        }
+                    }
+                } else {
+                    do {
+                        try capture.start()
+                    } catch {
+                        FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
+                        usesBufferedStream = false
+                        return
+                    }
+                }
+                isRecording = true
+                FileHandle.standardError.write(Data(
+                    usesBufferedStream ? "● recording + buffered decode\n".utf8 : "● recording\n".utf8
+                ))
+                MainActor.assumeIsolated {
+                    overlay?.show(.recording)
+                    menuBar?.setRecording(true)
+                }
+            case .released:
+                guard recordingMode == .hold, isRecording else { return }
+                isRecording = false
+                if usesBufferedStream {
+                    finishBufferedTranscription(
+                        startTask: bufferedStartTask,
+                        transcriptionService: transcriptionService,
+                        overlay: overlay,
+                        menuBar: menuBar,
+                        dumpWav: dumpWav,
+                        learningController: learningController
+                    )
+                } else {
                     let samples = capture.stop()
                     transcribe(
                         samples: samples,
@@ -164,37 +232,23 @@ struct Run: ParsableCommand {
                         dumpWav: dumpWav,
                         learningController: learningController
                     )
-                    return
                 }
-                guard !isRecording else { return }
-                do {
-                    try capture.start()
-                    isRecording = true
-                    recordingMode = activationMode
-                    FileHandle.standardError.write(Data("● recording\n".utf8))
-                    MainActor.assumeIsolated {
-                        overlay?.show(.recording)
-                        menuBar?.setRecording(true)
-                    }
-                } catch {
-                    FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
-                }
-            case .released:
-                guard recordingMode == .hold, isRecording else { return }
-                isRecording = false
-                let samples = capture.stop()
-                transcribe(
-                    samples: samples,
-                    transcriptionService: transcriptionService,
-                    overlay: overlay,
-                    menuBar: menuBar,
-                    dumpWav: dumpWav,
-                    learningController: learningController
-                )
+                usesBufferedStream = false
+                bufferedStartTask = nil
             case .cancelRequested:
                 guard isRecording else { return }
                 isRecording = false
-                _ = capture.stop()
+                if usesBufferedStream {
+                    let startTask = bufferedStartTask
+                    Task {
+                        _ = try? await startTask?.value
+                        await transcriptionService.cancelBufferedStream()
+                    }
+                } else {
+                    _ = capture.stop()
+                }
+                usesBufferedStream = false
+                bufferedStartTask = nil
                 FileHandle.standardError.write(Data("recording canceled\n".utf8))
                 MainActor.assumeIsolated {
                     overlay?.hide()
@@ -402,6 +456,68 @@ private func transcribe(
             }
         } catch {
             FileHandle.standardError.write(Data("transcription failed: \(error)\n".utf8))
+            await MainActor.run {
+                overlay?.hide()
+                menuBar?.setRecording(false)
+            }
+        }
+    }
+}
+
+private func finishBufferedTranscription(
+    startTask: Task<Void, Error>?,
+    transcriptionService: TranscriptionService,
+    overlay: RecordingOverlay?,
+    menuBar: MenuBarController?,
+    dumpWav: Bool,
+    learningController: CorrectionLearningController
+) {
+    MainActor.assumeIsolated {
+        overlay?.show(.transcribing)
+        menuBar?.setTranscribing()
+    }
+    Task {
+        let started = Date()
+        do {
+            try await startTask?.value
+            let result = try await transcriptionService.finishBufferedStream()
+            let elapsed = Date().timeIntervalSince(started)
+            let seconds = Double(result.samples.count) / AudioCapture.targetSampleRate
+            let rms = computeRMS(result.samples)
+            FileHandle.standardError.write(Data(
+                String(
+                    format: "○ buffered %.2fs · rms %.3f · release-to-text %.2fs\n",
+                    seconds,
+                    rms,
+                    elapsed
+                ).utf8
+            ))
+            if dumpWav, !result.samples.isEmpty {
+                let path = "/tmp/parrot-last.wav"
+                try WAVWriter.write(samples: result.samples, sampleRate: 16_000, to: path)
+                FileHandle.standardError.write(Data("  wrote \(path)\n".utf8))
+            }
+            FileHandle.standardError.write(Data("→ \(result.text)\n".utf8))
+            await MainActor.run {
+                guard !result.text.isEmpty else {
+                    overlay?.hide()
+                    menuBar?.setRecording(false)
+                    return
+                }
+                let snapshot = FocusedTextSnapshot.capture()
+                TextInjector.inject(result.text)
+                learningController.remember(
+                    insertedText: result.text,
+                    snapshot: snapshot
+                )
+                overlay?.hide()
+                menuBar?.setRecording(false)
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "buffered transcription failed: \(error)\n".utf8
+            ))
+            await transcriptionService.cancelBufferedStream()
             await MainActor.run {
                 overlay?.hide()
                 menuBar?.setRecording(false)
