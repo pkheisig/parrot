@@ -115,11 +115,15 @@ language from the finished recording, selects the English or German specialist
 only above the confidence threshold, and otherwise transcribes with the
 multilingual detector.
 
-Fixed English mode also owns a buffered streaming lifecycle. This does not paste
-unstable partial text into the focused application: only confirmed segments and
-the reconciled final tail leave the transcriber after hotkey release. The model
-and decoding settings are identical to normal English transcription, so the
-latency optimization does not substitute a smaller checkpoint.
+Every language mode records the complete utterance before starting one
+full-context transcription. In Automatic mode, the finished recording first
+goes through language detection and then the selected specialist. No provisional
+streaming segment can become part of the delivered transcript.
+
+WhisperKit warm-up includes three discarded seconds of silence after model loading.
+This forces Core ML to compile its inference graphs before runtime readiness is
+reported, so the first real dictation uses the same steady-state path as later
+recordings without conditioning or retaining any priming transcript.
 
 Adding an engine = one new file conforming to `Transcriber`.
 

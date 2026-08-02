@@ -157,8 +157,6 @@ struct Run: ParsableCommand {
         var activationMode = settings.activationMode
         var recordingMode = activationMode
         var isRecording = false
-        var usesBufferedStream = false
-        var bufferedStartTask: Task<Void, Error>?
         var recordingTarget: TextInjector.Target?
         var recordingSnapshot: FocusedTextSnapshot?
         let readiness = MainActor.assumeIsolated {
@@ -208,84 +206,6 @@ struct Run: ParsableCommand {
                     isRecording = false
                     let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
                     let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
-                    if usesBufferedStream {
-                        finishBufferedTranscription(
-                            startTask: bufferedStartTask,
-                            transcriptionService: transcriptionService,
-                            overlay: overlay,
-                            menuBar: menuBar,
-                            dumpWav: dumpWav,
-                            learningController: learningController,
-                            deliveryTarget: deliveryTarget,
-                            deliverySnapshot: deliverySnapshot
-                        )
-                    } else {
-                        let samples = capture.stop()
-                        transcribe(
-                            samples: samples,
-                            transcriptionService: transcriptionService,
-                            overlay: overlay,
-                            menuBar: menuBar,
-                            dumpWav: dumpWav,
-                            learningController: learningController,
-                            deliveryTarget: deliveryTarget,
-                            deliverySnapshot: deliverySnapshot
-                        )
-                    }
-                    usesBufferedStream = false
-                    bufferedStartTask = nil
-                    recordingTarget = nil
-                    recordingSnapshot = nil
-                    return
-                }
-                guard !isRecording else { return }
-                recordingTarget = TextInjector.captureTarget()
-                recordingSnapshot = FocusedTextSnapshot.capture()
-                recordingMode = activationMode
-                usesBufferedStream = model == nil
-                    && settings.transcriptionLanguage == .english
-                if usesBufferedStream {
-                    bufferedStartTask = Task {
-                        try await transcriptionService.startBufferedStream { level in
-                            Task { @MainActor in
-                                overlay?.pushLevel(level)
-                            }
-                        }
-                    }
-                } else {
-                    do {
-                        try capture.start()
-                    } catch {
-                        FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
-                        usesBufferedStream = false
-                        return
-                    }
-                }
-                isRecording = true
-                FileHandle.standardError.write(Data(
-                    usesBufferedStream ? "● recording + buffered decode\n".utf8 : "● recording\n".utf8
-                ))
-                MainActor.assumeIsolated {
-                    overlay?.show(.recording)
-                    menuBar?.setRecording(true)
-                }
-            case .released:
-                guard recordingMode == .hold, isRecording else { return }
-                isRecording = false
-                let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
-                let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
-                if usesBufferedStream {
-                    finishBufferedTranscription(
-                        startTask: bufferedStartTask,
-                        transcriptionService: transcriptionService,
-                        overlay: overlay,
-                        menuBar: menuBar,
-                        dumpWav: dumpWav,
-                        learningController: learningController,
-                        deliveryTarget: deliveryTarget,
-                        deliverySnapshot: deliverySnapshot
-                    )
-                } else {
                     let samples = capture.stop()
                     transcribe(
                         samples: samples,
@@ -297,25 +217,48 @@ struct Run: ParsableCommand {
                         deliveryTarget: deliveryTarget,
                         deliverySnapshot: deliverySnapshot
                     )
+                    recordingTarget = nil
+                    recordingSnapshot = nil
+                    return
                 }
-                usesBufferedStream = false
-                bufferedStartTask = nil
+                guard !isRecording else { return }
+                recordingTarget = TextInjector.captureTarget()
+                recordingSnapshot = FocusedTextSnapshot.capture()
+                recordingMode = activationMode
+                do {
+                    try capture.start()
+                } catch {
+                    FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
+                    return
+                }
+                isRecording = true
+                FileHandle.standardError.write(Data("● recording\n".utf8))
+                MainActor.assumeIsolated {
+                    overlay?.show(.recording)
+                    menuBar?.setRecording(true)
+                }
+            case .released:
+                guard recordingMode == .hold, isRecording else { return }
+                isRecording = false
+                let deliveryTarget = TextInjector.captureTarget() ?? recordingTarget
+                let deliverySnapshot = FocusedTextSnapshot.capture() ?? recordingSnapshot
+                let samples = capture.stop()
+                transcribe(
+                    samples: samples,
+                    transcriptionService: transcriptionService,
+                    overlay: overlay,
+                    menuBar: menuBar,
+                    dumpWav: dumpWav,
+                    learningController: learningController,
+                    deliveryTarget: deliveryTarget,
+                    deliverySnapshot: deliverySnapshot
+                )
                 recordingTarget = nil
                 recordingSnapshot = nil
             case .cancelRequested:
                 guard isRecording else { return }
                 isRecording = false
-                if usesBufferedStream {
-                    let startTask = bufferedStartTask
-                    Task {
-                        _ = try? await startTask?.value
-                        await transcriptionService.cancelBufferedStream()
-                    }
-                } else {
-                    _ = capture.stop()
-                }
-                usesBufferedStream = false
-                bufferedStartTask = nil
+                _ = capture.stop()
                 recordingTarget = nil
                 recordingSnapshot = nil
                 FileHandle.standardError.write(Data("recording canceled\n".utf8))
@@ -533,70 +476,6 @@ private func transcribe(
     }
 }
 
-private func finishBufferedTranscription(
-    startTask: Task<Void, Error>?,
-    transcriptionService: TranscriptionService,
-    overlay: RecordingOverlay?,
-    menuBar: MenuBarController?,
-    dumpWav: Bool,
-    learningController: CorrectionLearningController,
-    deliveryTarget: TextInjector.Target?,
-    deliverySnapshot: FocusedTextSnapshot?
-) {
-    MainActor.assumeIsolated {
-        overlay?.show(.transcribing)
-        menuBar?.setTranscribing()
-    }
-    Task {
-        let started = Date()
-        do {
-            try await startTask?.value
-            let result = try await transcriptionService.finishBufferedStream()
-            let elapsed = Date().timeIntervalSince(started)
-            let seconds = Double(result.samples.count) / AudioCapture.targetSampleRate
-            let rms = computeRMS(result.samples)
-            FileHandle.standardError.write(Data(
-                String(
-                    format: "○ buffered %.2fs · rms %.3f · release-to-text %.2fs\n",
-                    seconds,
-                    rms,
-                    elapsed
-                ).utf8
-            ))
-            if dumpWav, !result.samples.isEmpty {
-                let path = "/tmp/parrot-last.wav"
-                try WAVWriter.write(samples: result.samples, sampleRate: 16_000, to: path)
-                FileHandle.standardError.write(Data("  wrote \(path)\n".utf8))
-            }
-            FileHandle.standardError.write(Data("→ \(result.text)\n".utf8))
-            guard !result.text.isEmpty else {
-                await MainActor.run {
-                    overlay?.hide()
-                    menuBar?.setRecording(false)
-                }
-                return
-            }
-            await deliverTranscript(
-                result.text,
-                overlay: overlay,
-                menuBar: menuBar,
-                learningController: learningController,
-                deliveryTarget: deliveryTarget,
-                deliverySnapshot: deliverySnapshot
-            )
-        } catch {
-            FileHandle.standardError.write(Data(
-                "buffered transcription failed: \(error)\n".utf8
-            ))
-            await transcriptionService.cancelBufferedStream()
-            await MainActor.run {
-                overlay?.hide()
-                menuBar?.setRecording(false)
-            }
-        }
-    }
-}
-
 @MainActor
 private func deliverTranscript(
     _ text: String,
@@ -723,8 +602,8 @@ struct TranscribeFile: ParsableCommand {
         shouldDisplay: false
     )
 
-    @Argument(help: "Path to an audio file.")
-    var path: String
+    @Argument(help: "One or more audio files. The model is loaded once for the complete batch.")
+    var paths: [String]
 
     @Option(name: .long, help: "automatic, english, or german")
     var language: String = TranscriptionLanguage.automatic.rawValue
@@ -761,18 +640,26 @@ struct TranscribeFile: ParsableCommand {
             dictionary = CorrectionDictionaryStore()
         }
 
-        let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: path)
+        let recordings = try paths.map { path in
+            (path, try AudioProcessor.loadAudioAsFloatArray(fromPath: path))
+        }
         let service = TranscriptionService(
             model: model,
             language: selectedLanguage,
             dictionary: dictionary
         )
         let semaphore = DispatchSemaphore(value: 0)
-        var capturedResult: Result<String, Error>?
+        var capturedResult: Result<[(String, String, TimeInterval)], Error>?
         Task.detached {
             do {
                 try await service.warmUp()
-                capturedResult = .success(try await service.transcribe(samples))
+                var transcripts: [(String, String, TimeInterval)] = []
+                for (path, samples) in recordings {
+                    let started = Date()
+                    let text = try await service.transcribe(samples)
+                    transcripts.append((path, text, Date().timeIntervalSince(started)))
+                }
+                capturedResult = .success(transcripts)
             } catch {
                 capturedResult = .failure(error)
             }
@@ -780,8 +667,14 @@ struct TranscribeFile: ParsableCommand {
         }
         semaphore.wait()
         switch capturedResult {
-        case let .success(text):
-            print(text)
+        case let .success(transcripts):
+            for (path, text, elapsed) in transcripts {
+                if transcripts.count > 1 {
+                    print("\(path)\t\(String(format: "%.3f", elapsed))s\t\(text)")
+                } else {
+                    print(text)
+                }
+            }
         case let .failure(error):
             throw error
         case nil:

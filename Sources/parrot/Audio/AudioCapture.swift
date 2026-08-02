@@ -45,8 +45,11 @@ final class AudioCapture {
         samples.removeAll(keepingCapacity: true)
         lock.unlock()
 
-        // Tap with input format; convert inside the callback.
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+        // Keep the hardware callback small so releasing the shortcut cannot
+        // strand a large final input buffer before it reaches the transcript.
+        // At 48 kHz, 1024 frames cap that boundary at roughly 21 ms instead of
+        // the roughly 85 ms produced by a 4096-frame tap.
+        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             self?.process(buffer: buffer, converter: converter, targetFormat: targetFormat)
         }
 

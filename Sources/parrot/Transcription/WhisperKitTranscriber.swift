@@ -7,13 +7,6 @@ actor WhisperKitTranscriber: Transcriber {
     private let model: TranscriptionModel
     private let language: TranscriptionLanguage
     private var pipeline: WhisperKit?
-    private var bufferedStream: ActiveBufferedStream?
-
-    private struct ActiveBufferedStream {
-        let transcriber: AudioStreamTranscriber
-        let stateBox: BufferedStreamStateBox
-        let task: Task<Void, Error>
-    }
 
     init(
         model: TranscriptionModel,
@@ -25,9 +18,9 @@ actor WhisperKitTranscriber: Transcriber {
         self.language = model.languages.contains("multi") ? language : .english
     }
 
-    /// Loads the model into memory; downloads first if not already on disk.
-    /// Call once at startup so the first hotkey press isn't blocked on model
-    /// download/load.
+    /// Loads the model into memory; downloads first if not already on disk, then
+    /// runs one discarded inference so Core ML compilation cannot delay the
+    /// user's first dictation.
     func warmUp() async throws {
         if pipeline != nil { return }
         guard let whisperKitID = model.whisperKitID else {
@@ -49,14 +42,37 @@ actor WhisperKitTranscriber: Transcriber {
         )
         let config = WhisperKitConfig(
             model: whisperKitID,
+            downloadBase: WhisperKitModelStore.downloadBase,
             computeOptions: computeOptions,
             verbose: false,
             prewarm: false,
             load: true
         )
-        pipeline = try await WhisperKit(config)
-        FileHandle.standardError.write(Data("✓ \(model.id) ready\n".utf8))
+        let loadedPipeline = try await WhisperKit(config)
+        pipeline = loadedPipeline
+
+        let inferenceStarted = Date()
+        _ = try await loadedPipeline.transcribe(
+            audioArray: Self.inferenceWarmUpAudio,
+            decodeOptions: Self.decodingOptions(for: language)
+        )
+        let inferenceElapsed = Date().timeIntervalSince(inferenceStarted)
+        FileHandle.standardError.write(Data(
+            String(
+                format: "✓ %@ ready · inference primed %.2fs\n",
+                model.id,
+                inferenceElapsed
+            ).utf8
+        ))
     }
+
+    /// Three seconds of discarded silence are enough to compile the mel, encoder,
+    /// prefill, and decoder graphs. WhisperKit does not carry transcript state
+    /// between calls, so this cannot condition the subsequent real recording.
+    static let inferenceWarmUpAudio = [Float](
+        repeating: 0,
+        count: WhisperKit.sampleRate * 3
+    )
 
     func transcribe(_ audio: [Float]) async throws -> String {
         if pipeline == nil { try await warmUp() }
@@ -74,114 +90,6 @@ actor WhisperKitTranscriber: Transcriber {
             ))
         }
         return sanitized
-    }
-
-    /// Starts WhisperKit's segment-confirming live decoder. Text remains
-    /// private until `finishBufferedStream()`; only the waveform level escapes.
-    func startBufferedStream(
-        onLevel: @escaping @Sendable (Float) -> Void
-    ) async throws {
-        guard bufferedStream == nil else { return }
-        if pipeline == nil { try await warmUp() }
-        guard let pipeline, let tokenizer = pipeline.tokenizer else {
-            throw TranscriberError.notLoaded
-        }
-
-        let stateBox = BufferedStreamStateBox()
-        let stream = AudioStreamTranscriber(
-            audioEncoder: pipeline.audioEncoder,
-            featureExtractor: pipeline.featureExtractor,
-            segmentSeeker: pipeline.segmentSeeker,
-            textDecoder: pipeline.textDecoder,
-            tokenizer: tokenizer,
-            audioProcessor: pipeline.audioProcessor,
-            decodingOptions: Self.decodingOptions(for: language),
-            requiredSegmentsForConfirmation: 1,
-            silenceThreshold: 0.3,
-            compressionCheckWindow: 60,
-            useVAD: true
-        ) { _, state in
-            stateBox.update(state)
-            if let level = state.bufferEnergy.last {
-                onLevel(level)
-            }
-        }
-        let task = Task {
-            try await stream.startStreamTranscription()
-        }
-        bufferedStream = ActiveBufferedStream(
-            transcriber: stream,
-            stateBox: stateBox,
-            task: task
-        )
-
-        // Do not report recording as started until WhisperKit's audio engine is
-        // live. This also turns microphone/startup failures into normal errors.
-        for _ in 0..<40 {
-            if stateBox.snapshot?.isRecording == true { return }
-            if task.isCancelled { break }
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        await stream.stopStreamTranscription()
-        task.cancel()
-        _ = try? await task.value
-        bufferedStream = nil
-        throw TranscriberError.streamStartTimedOut
-    }
-
-    func finishBufferedStream() async throws -> BufferedTranscriptionResult {
-        guard let active = bufferedStream, let pipeline else {
-            throw TranscriberError.noActiveStream
-        }
-        await active.transcriber.stopStreamTranscription()
-        // Release must not wait for a stale whole-buffer inference that happened
-        // to start just before the key came up. Keep the most recently published
-        // segments, cancel that pass, then decode only the unresolved tail below.
-        active.task.cancel()
-        _ = try? await active.task.value
-
-        let samples = Array(pipeline.audioProcessor.audioSamples)
-        let state = active.stateBox.snapshot
-        bufferedStream = nil
-
-        let segments = state.map(BufferedTranscriptAssembler.orderedSegments) ?? []
-        let draft = Self.sanitize(segments.map(\.text).joined(separator: " "))
-        guard !samples.isEmpty else {
-            return BufferedTranscriptionResult(samples: [], text: draft)
-        }
-
-        // Re-decode only a short overlap plus audio recorded after the latest
-        // completed stream segment. If no segment completed, fall back to the
-        // original whole-recording path for correctness.
-        guard let lastSegment = segments.last, !draft.isEmpty else {
-            return BufferedTranscriptionResult(
-                samples: samples,
-                text: try await transcribe(samples)
-            )
-        }
-        let duration = Double(samples.count) / Double(WhisperKit.sampleRate)
-        let tailStartSeconds = max(0, min(duration, Double(lastSegment.end) - 0.8))
-        let tailStart = min(
-            samples.count,
-            max(0, Int(tailStartSeconds * Double(WhisperKit.sampleRate)))
-        )
-        let tail = Array(samples[tailStart...])
-        guard tail.count >= WhisperKit.sampleRate / 4 else {
-            return BufferedTranscriptionResult(samples: samples, text: draft)
-        }
-        let tailText = try await transcribe(tail)
-        return BufferedTranscriptionResult(
-            samples: samples,
-            text: TranscriptMerger.merge(prefix: draft, suffix: tailText)
-        )
-    }
-
-    func cancelBufferedStream() async {
-        guard let active = bufferedStream else { return }
-        await active.transcriber.stopStreamTranscription()
-        active.task.cancel()
-        _ = try? await active.task.value
-        bufferedStream = nil
     }
 
     func detectLanguage(_ audio: [Float]) async throws -> LanguageDetection {
@@ -202,7 +110,10 @@ actor WhisperKitTranscriber: Transcriber {
         guard let whisperKitID = model.whisperKitID else {
             throw TranscriberError.missingEngineID
         }
-        _ = try await WhisperKit.download(variant: whisperKitID)
+        _ = try await WhisperKit.download(
+            variant: whisperKitID,
+            downloadBase: WhisperKitModelStore.downloadBase
+        )
     }
 
     static func decodingOptions(for language: TranscriptionLanguage) -> DecodingOptions {
@@ -240,6 +151,35 @@ actor WhisperKitTranscriber: Transcriber {
         out = out.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+enum WhisperKitModelStore {
+    /// WhisperKit defaults to `~/Documents/huggingface`, which is protected by
+    /// macOS Files and Folders privacy. A menu-bar app launched by LaunchServices
+    /// can block there even though the same executable works from Terminal.
+    /// Application Support belongs to Parrot and does not depend on another
+    /// process having granted access to the user's Documents directory.
+    static let downloadBase: URL = {
+        let root = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        let url = root
+            .appendingPathComponent("Parrot", isDirectory: true)
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent("WhisperKit", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            FileHandle.standardError.write(Data(
+                "Could not create WhisperKit model cache at \(url.path): \(error)\n".utf8
+            ))
+        }
+        return url
+    }()
 }
 
 struct LanguageDetection: Equatable {
@@ -380,31 +320,6 @@ actor TranscriptionService {
         return dictionary.apply(to: raw)
     }
 
-    func supportsBufferedStreaming() -> Bool {
-        explicitModel == nil && language == .english
-    }
-
-    func startBufferedStream(
-        onLevel: @escaping @Sendable (Float) -> Void
-    ) async throws {
-        guard supportsBufferedStreaming() else {
-            throw TranscriberError.streamingUnavailable
-        }
-        try await english.startBufferedStream(onLevel: onLevel)
-    }
-
-    func finishBufferedStream() async throws -> BufferedTranscriptionResult {
-        let result = try await english.finishBufferedStream()
-        return BufferedTranscriptionResult(
-            samples: result.samples,
-            text: dictionary.apply(to: result.text)
-        )
-    }
-
-    func cancelBufferedStream() async {
-        await english.cancelBufferedStream()
-    }
-
     private func transcriber(for language: TranscriptionLanguage) -> any Transcriber {
         switch language {
         case .automatic: detector
@@ -458,120 +373,4 @@ enum TranscriberError: Error {
     case missingEngineID
     case notLoaded
     case modelUnavailable
-    case streamingUnavailable
-    case noActiveStream
-    case streamStartTimedOut
-}
-
-struct BufferedTranscriptionResult: Sendable {
-    let samples: [Float]
-    let text: String
-}
-
-private final class BufferedStreamStateBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var state: AudioStreamTranscriber.State?
-
-    var snapshot: AudioStreamTranscriber.State? {
-        lock.lock()
-        defer { lock.unlock() }
-        return state
-    }
-
-    func update(_ state: AudioStreamTranscriber.State) {
-        lock.lock()
-        self.state = state
-        lock.unlock()
-    }
-}
-
-enum BufferedTranscriptAssembler {
-    static func orderedSegments(
-        from state: AudioStreamTranscriber.State
-    ) -> [TranscriptionSegment] {
-        orderedSegments(
-            confirmed: state.confirmedSegments,
-            unconfirmed: state.unconfirmedSegments
-        )
-    }
-
-    static func orderedSegments(
-        confirmed: [TranscriptionSegment],
-        unconfirmed: [TranscriptionSegment]
-    ) -> [TranscriptionSegment] {
-        let candidates = confirmed + unconfirmed
-        var seen = Set<String>()
-        return candidates
-            .sorted {
-                if $0.start != $1.start { return $0.start < $1.start }
-                return $0.end < $1.end
-            }
-            .filter { segment in
-                let key = "\(segment.start)|\(segment.end)|\(segment.text)"
-                return seen.insert(key).inserted
-            }
-    }
-}
-
-enum TranscriptMerger {
-    static func merge(prefix: String, suffix: String) -> String {
-        let prefix = clean(prefix)
-        let suffix = clean(suffix)
-        guard !prefix.isEmpty else { return suffix }
-        guard !suffix.isEmpty else { return prefix }
-
-        let left = tokens(in: prefix)
-        let right = tokens(in: suffix)
-        let maximum = min(16, left.count, right.count)
-        var overlap = 0
-        if maximum > 0 {
-            for count in stride(from: maximum, through: 1, by: -1) {
-                let leftWords = left.suffix(count).map(\.normalized)
-                let rightWords = right.prefix(count).map(\.normalized)
-                if leftWords == rightWords {
-                    overlap = count
-                    break
-                }
-            }
-        }
-
-        let remainder: String
-        if overlap > 0, let end = Range(right[overlap - 1].range, in: suffix)?.upperBound {
-            remainder = String(suffix[end...])
-                .replacingOccurrences(
-                    of: #"^[\s\p{P}]+"#,
-                    with: "",
-                    options: .regularExpression
-                )
-        } else {
-            remainder = suffix
-        }
-        guard !remainder.isEmpty else { return prefix }
-        return clean(prefix + " " + remainder)
-    }
-
-    private struct WordToken {
-        let normalized: String
-        let range: NSRange
-    }
-
-    private static func tokens(in text: String) -> [WordToken] {
-        guard let expression = try? NSRegularExpression(
-            pattern: #"[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*"#
-        ) else { return [] }
-        let range = NSRange(text.startIndex..., in: text)
-        return expression.matches(in: text, range: range).compactMap { match in
-            guard let swiftRange = Range(match.range, in: text) else { return nil }
-            return WordToken(
-                normalized: text[swiftRange].lowercased(),
-                range: match.range
-            )
-        }
-    }
-
-    private static func clean(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }

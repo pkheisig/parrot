@@ -118,6 +118,28 @@ final class DictationSettingsTests: XCTestCase {
         XCTAssertNotNil(german?.downloadURL)
     }
 
+    func testWhisperKitCacheDoesNotRequireDocumentsPermission() {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        XCTAssertTrue(
+            WhisperKitModelStore.downloadBase.standardizedFileURL.path
+                .hasPrefix(applicationSupport.standardizedFileURL.path + "/")
+        )
+        XCTAssertFalse(WhisperKitModelStore.downloadBase.path.contains("/Documents/"))
+    }
+
+    func testWhisperKitInferenceWarmUpUsesThreeSecondsOfDiscardedSilence() {
+        XCTAssertEqual(
+            WhisperKitTranscriber.inferenceWarmUpAudio.count,
+            48_000
+        )
+        XCTAssertTrue(
+            WhisperKitTranscriber.inferenceWarmUpAudio.allSatisfy { $0 == 0 }
+        )
+    }
+
     func testAppAndStatusItemUseIndependentStableIdentity() {
         XCTAssertEqual(AppIdentity.bundleIdentifier, "com.pkheisig.parrot")
         XCTAssertFalse(AppIdentity.statusItemAutosaveName.contains("codex"))

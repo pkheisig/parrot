@@ -35,11 +35,10 @@ The installer drops the binary in `/usr/local/bin/parrot`. Builds are unsigned f
 2. **Click into the text field you want to dictate into** — Messages, the address bar, a Slack thread, anywhere a cursor blinks.
 3. **Hold the `fn` key, speak, release.** A small pill appears at the bottom of the screen while the mic is hot. Press **Escape** to cancel and discard the recording. Click the Parrot menu-bar icon to record a different shortcut or switch to **Toggle** (press once to start, once again to stop).
 4. **The transcript types itself in at the cursor** when you release, followed
-   by one separator space so the next dictation continues naturally. In English
-   mode, Parrot decodes confirmed segments privately while you are still
-   speaking, then reconciles only the unfinished tail on release. Automatic and
-   German modes still transcribe the completed recording because routing or the
-   German specialist requires the finished audio. Parrot recognizes native,
+   by one separator space so the next dictation continues naturally. Parrot
+   records the complete utterance and starts one full-context transcription
+   after you release the shortcut. This avoids committing provisional streaming
+   segments or losing words at the recording boundary. Parrot recognizes native,
    web, Electron, and opaque custom editors. Positively identified non-text
    controls copy the transcript to the clipboard and show a brief
    **Copied to clipboard** pill instead of sending keystrokes to the wrong place.
@@ -79,8 +78,10 @@ language. Confident English is then transcribed with the English-specific
 Whisper Large v3 Turbo model; confident German is transcribed with the German-specific
 Whisper Large v3 Turbo Q5 model. Other or ambiguous languages fall back to the
 multilingual model. The English (~1.62 GB) and German (~548 MB) specialists are
-prefetched in the background on first app launch and cached locally. Audio
-remains on the Mac; only model downloads use the network.
+prefetched in the background on first app launch and cached locally. The active
+WhisperKit model also runs one discarded inference during startup, moving Core
+ML compilation out of the first real dictation. Audio remains on the Mac; only
+model downloads use the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
