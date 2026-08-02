@@ -140,7 +140,8 @@ to clipboard** state rather than typing into an unrelated window.
 The target application PID and the readable correction snapshot are captured at
 hotkey release, before asynchronous transcription can change timing or focus.
 Delivery is transactional: Parrot snapshots the existing clipboard, stages the
-transcript, and posts Command-V directly to the captured PID rather than global
+transcript with a guaranteed trailing separator space, and posts Command-V
+directly to the captured PID rather than global
 session focus. Readable fields are polled for the exact inserted span. Focused
 opaque editor surfaces restore the prior clipboard after the paste-consumption
 window even when they hide their content from Accessibility. For completely

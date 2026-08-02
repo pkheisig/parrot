@@ -4,6 +4,15 @@ import CoreGraphics
 import Foundation
 import OSLog
 
+enum TextDeliveryFormatter {
+    /// Keep successive dictation segments naturally separated while preserving
+    /// any whitespace the recognizer already supplied.
+    static func withTrailingSpace(_ text: String) -> String {
+        guard let last = text.last else { return text }
+        return last.isWhitespace ? text : text + " "
+    }
+}
+
 /// Delivers transcripts to the application captured at hotkey release. The
 /// primary path stages a clipboard transaction and posts Paste directly to the
 /// target PID; Unicode events remain only as a last-resort clipboard-failure

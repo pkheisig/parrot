@@ -24,7 +24,7 @@ struct Parrot: ParsableCommand {
 struct DeliverTest: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "deliver-test",
-        abstract: "Deliver fixed text to the focused application for UI verification."
+        abstract: "Deliver transcript text to the focused application for UI verification."
     )
 
     @Argument(help: "Text to deliver to the focused application.")
@@ -50,7 +50,7 @@ struct DeliverTest: ParsableCommand {
                     : nil
             }
             let delivery = await TextInjector.deliver(
-                text,
+                TextDeliveryFormatter.withTrailingSpace(text),
                 to: target,
                 verificationSnapshot: snapshot
             )
@@ -620,8 +620,9 @@ private func deliverTranscript(
     } else {
         snapshot = nil
     }
+    let deliveryText = TextDeliveryFormatter.withTrailingSpace(text)
     let delivery = await TextInjector.deliver(
-        text,
+        deliveryText,
         to: target,
         verificationSnapshot: snapshot
     )

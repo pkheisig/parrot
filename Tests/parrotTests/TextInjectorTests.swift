@@ -4,6 +4,17 @@ import XCTest
 @testable import parrot
 
 final class TextInjectorTests: XCTestCase {
+    func testTranscriptDeliveryGuaranteesOneTrailingSeparator() {
+        XCTAssertEqual(
+            TextDeliveryFormatter.withTrailingSpace("First sentence."),
+            "First sentence. "
+        )
+        XCTAssertEqual(TextDeliveryFormatter.withTrailingSpace("next phrase"), "next phrase ")
+        XCTAssertEqual(TextDeliveryFormatter.withTrailingSpace("already spaced "), "already spaced ")
+        XCTAssertEqual(TextDeliveryFormatter.withTrailingSpace("line break\n"), "line break\n")
+        XCTAssertEqual(TextDeliveryFormatter.withTrailingSpace(""), "")
+    }
+
     func testRecognizesEachWritableAccessibilityTextAttribute() {
         XCTAssertEqual(
             TextDestinationClassifier.classify(evidence(writable: true)),
