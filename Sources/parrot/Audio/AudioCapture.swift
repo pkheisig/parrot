@@ -1,6 +1,82 @@
 import AVFoundation
 import Foundation
 
+typealias AudioCaptureTap = (AVAudioPCMBuffer, AVAudioTime) -> Void
+
+protocol AudioCaptureInputNode: AnyObject {
+    func outputFormat(forBus bus: AVAudioNodeBus) -> AVAudioFormat
+    func installTap(
+        onBus bus: AVAudioNodeBus,
+        bufferSize: AVAudioFrameCount,
+        format: AVAudioFormat,
+        block: @escaping AudioCaptureTap
+    )
+    func removeTap(onBus bus: AVAudioNodeBus)
+}
+
+protocol AudioCaptureEngine: AnyObject {
+    var inputNode: AudioCaptureInputNode { get }
+    func prepare()
+    func start() throws
+    func stop()
+    func reset()
+}
+
+private final class AVAudioInputNodeAdapter: AudioCaptureInputNode {
+    private let node: AVAudioInputNode
+
+    init(node: AVAudioInputNode) {
+        self.node = node
+    }
+
+    func outputFormat(forBus bus: AVAudioNodeBus) -> AVAudioFormat {
+        node.outputFormat(forBus: bus)
+    }
+
+    func installTap(
+        onBus bus: AVAudioNodeBus,
+        bufferSize: AVAudioFrameCount,
+        format: AVAudioFormat,
+        block: @escaping AudioCaptureTap
+    ) {
+        node.installTap(
+            onBus: bus,
+            bufferSize: bufferSize,
+            format: format,
+            block: block
+        )
+    }
+
+    func removeTap(onBus bus: AVAudioNodeBus) {
+        node.removeTap(onBus: bus)
+    }
+}
+
+private final class AVAudioEngineAdapter: AudioCaptureEngine {
+    private let audioEngine = AVAudioEngine()
+    private lazy var audioInputNode: AudioCaptureInputNode = {
+        AVAudioInputNodeAdapter(node: audioEngine.inputNode)
+    }()
+
+    var inputNode: AudioCaptureInputNode { audioInputNode }
+
+    func prepare() {
+        audioEngine.prepare()
+    }
+
+    func start() throws {
+        try audioEngine.start()
+    }
+
+    func stop() {
+        audioEngine.stop()
+    }
+
+    func reset() {
+        audioEngine.reset()
+    }
+}
+
 /// Captures microphone audio while recording is active and returns a 16 kHz
 /// mono Float32 buffer when stopped. Format-converts on the fly so callers
 /// don't have to worry about the input device's native rate.
@@ -12,21 +88,81 @@ final class AudioCapture {
 
     static let targetSampleRate: Double = 16_000
 
-    private let engine = AVAudioEngine()
+    private enum Lifecycle {
+        case idle
+        case starting
+        case recording
+        case stopping
+    }
+
+    private let engine: any AudioCaptureEngine
     private var converter: AVAudioConverter?
     private var samples: [Float] = []
-    private var isRecording = false
-    private let lock = NSLock()
+    private let samplesLock = NSLock()
+    private let lifecycleLock = NSLock()
+    private var lifecycle = Lifecycle.idle
+    private var stopRequested = false
+    private var captureInputNode: (any AudioCaptureInputNode)?
+    private var ownsInputTap = false
+
+    init() {
+        engine = AVAudioEngineAdapter()
+    }
+
+    init(engine: any AudioCaptureEngine) {
+        self.engine = engine
+    }
 
     /// Called for every audio buffer with the buffer's RMS level (0…~1).
     /// Invoked on an arbitrary thread; hop to main if you touch UI.
     var onLevel: ((Float) -> Void)?
 
-    /// Begin recording. Idempotent — calling while already recording is a no-op.
-    func start() throws {
-        guard !isRecording else { return }
+    deinit {
+        cleanupCapture()
+    }
 
+    /// Begin recording. Idempotent — calling while starting or recording is a no-op.
+    func start() throws {
+        guard beginStarting() else { return }
+
+        do {
+            try startCapture()
+        } catch {
+            cleanupCapture()
+            discardSamples()
+            finishIdle()
+            throw error
+        }
+
+        // A stop can be requested synchronously by an injected engine/node
+        // while start is in progress. Finish the startup transaction before
+        // allowing another start, and discard that canceled capture.
+        if !finishStarting() {
+            cleanupCapture()
+            discardSamples()
+            finishIdle()
+        }
+    }
+
+    /// Stop recording and return all captured samples (16 kHz mono Float32).
+    @discardableResult
+    func stop() -> [Float] {
+        guard beginStopping() else { return [] }
+
+        cleanupCapture()
+        let captured = drainSamples()
+        finishIdle()
+        return captured
+    }
+
+    private func startCapture() throws {
         let input = engine.inputNode
+        setCaptureInputNode(input)
+
+        // AVAudioEngine raises an Objective-C exception for a duplicate tap;
+        // remove any stale bus-0 tap before attempting a new installation.
+        input.removeTap(onBus: 0)
+
         let inputFormat = input.outputFormat(forBus: 0)
 
         let targetFormat = AVAudioFormat(
@@ -41,42 +177,125 @@ final class AudioCapture {
         }
         self.converter = converter
 
-        lock.lock()
+        samplesLock.lock()
         samples.removeAll(keepingCapacity: true)
-        lock.unlock()
+        samplesLock.unlock()
 
         // Keep the hardware callback small so releasing the shortcut cannot
         // strand a large final input buffer before it reaches the transcript.
         // At 48 kHz, 1024 frames cap that boundary at roughly 21 ms instead of
         // the roughly 85 ms produced by a 4096-frame tap.
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+        input.installTap(
+            onBus: 0,
+            bufferSize: 1024,
+            format: inputFormat
+        ) { [weak self] buffer, _ in
             self?.process(buffer: buffer, converter: converter, targetFormat: targetFormat)
         }
+        setTapOwnership(node: input, ownsTap: true)
 
         engine.prepare()
         do {
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
             throw CaptureError.engineStartFailed(error)
         }
-
-        isRecording = true
     }
 
-    /// Stop recording and return all captured samples (16 kHz mono Float32).
-    @discardableResult
-    func stop() -> [Float] {
-        guard isRecording else { return [] }
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
-        isRecording = false
+    private func beginStarting() -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
 
-        lock.lock()
+        guard lifecycle == .idle else { return false }
+        lifecycle = .starting
+        stopRequested = false
+        return true
+    }
+
+    private func finishStarting() -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
+        guard lifecycle == .starting else { return false }
+        if stopRequested {
+            lifecycle = .stopping
+            stopRequested = false
+            return false
+        }
+        lifecycle = .recording
+        return true
+    }
+
+    private func beginStopping() -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
+        switch lifecycle {
+        case .idle, .stopping:
+            return false
+        case .starting:
+            stopRequested = true
+            return false
+        case .recording:
+            lifecycle = .stopping
+            return true
+        }
+    }
+
+    private func finishIdle() {
+        lifecycleLock.lock()
+        lifecycle = .idle
+        stopRequested = false
+        lifecycleLock.unlock()
+    }
+
+    private func setCaptureInputNode(_ node: any AudioCaptureInputNode) {
+        lifecycleLock.lock()
+        captureInputNode = node
+        lifecycleLock.unlock()
+    }
+
+    private func setTapOwnership(node: any AudioCaptureInputNode, ownsTap: Bool) {
+        lifecycleLock.lock()
+        captureInputNode = node
+        ownsInputTap = ownsTap
+        lifecycleLock.unlock()
+    }
+
+    private func cleanupCapture() {
+        lifecycleLock.lock()
+        let node = captureInputNode
+        let shouldRemoveTap = ownsInputTap
+        let hasCaptureSession = node != nil || shouldRemoveTap
+        captureInputNode = nil
+        ownsInputTap = false
+        lifecycleLock.unlock()
+
+        guard hasCaptureSession else {
+            converter = nil
+            return
+        }
+
+        engine.stop()
+        if shouldRemoveTap {
+            node?.removeTap(onBus: 0)
+        }
+        engine.reset()
+        converter = nil
+    }
+
+    private func drainSamples() -> [Float] {
+        samplesLock.lock()
         let captured = samples
         samples.removeAll(keepingCapacity: true)
-        lock.unlock()
+        samplesLock.unlock()
         return captured
+    }
+
+    private func discardSamples() {
+        samplesLock.lock()
+        samples.removeAll(keepingCapacity: true)
+        samplesLock.unlock()
     }
 
     private func process(
@@ -112,9 +331,9 @@ final class AudioCapture {
         let ptr = channelData[0]
         let chunk = Array(UnsafeBufferPointer(start: ptr, count: count))
 
-        lock.lock()
+        samplesLock.lock()
         samples.append(contentsOf: chunk)
-        lock.unlock()
+        samplesLock.unlock()
 
         if let onLevel {
             onLevel(computeRMS(chunk))
