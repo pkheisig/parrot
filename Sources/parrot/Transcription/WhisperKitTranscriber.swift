@@ -123,18 +123,6 @@ actor WhisperKitTranscriber: Transcriber {
         return sanitized
     }
 
-    func detectLanguage(_ audio: [Float]) async throws -> LanguageDetection {
-        if pipeline == nil { try await warmUp() }
-        guard let pipeline else { throw TranscriberError.notLoaded }
-        let memory = MemoryPeakTracker(label: "detect (model.id)")
-        defer { memory.logFinish() }
-        let result = try await pipeline.detectLangauge(audioArray: audio)
-        return LanguageDetection(
-            language: result.language,
-            logProbabilities: result.langProbs
-        )
-    }
-
     func isLoaded() -> Bool {
         pipeline != nil
     }
@@ -227,54 +215,16 @@ enum WhisperKitModelStore {
     }()
 }
 
-struct LanguageDetection: Equatable {
-    let language: String
-    let logProbabilities: [String: Float]
-}
-
-enum AutomaticLanguageRoute: Equatable {
-    case english
-    case german
-    case multilingualFallback
-}
-
-enum AutomaticLanguageRouter {
-    /// Avoid selecting a specialist when neither English nor German has enough
-    /// probability mass. Within that pair, a small German bias compensates for
-    /// short German phrases that Whisper otherwise tends to label as English.
-    static let minimumSupportedProbability: Float = 0.20
-    static let minimumSupportedTotal: Float = 0.35
-    static let germanPairThreshold: Float = 0.45
-
-    static func route(_ detection: LanguageDetection) -> AutomaticLanguageRoute {
-        let english = probability(detection.logProbabilities["en"])
-        let german = probability(detection.logProbabilities["de"])
-        let supportedTotal = english + german
-
-        guard max(english, german) >= minimumSupportedProbability,
-              supportedTotal >= minimumSupportedTotal
-        else {
-            return .multilingualFallback
-        }
-
-        let germanShare = german / supportedTotal
-        return germanShare >= germanPairThreshold ? .german : .english
-    }
-
-    private static func probability(_ rawScore: Float?) -> Float {
-        guard let rawScore else { return 0 }
-        return rawScore <= 0 ? exp(rawScore) : rawScore
-    }
-}
-
 actor TranscriptionService {
-    /// Automatic and English share one multilingual model. Language detection
-    /// and the final decode are separate calls, but they use the same loaded
-    /// pipeline so Automatic does not keep a detector beside a Large model.
-    private let multilingual: WhisperKitTranscriber
+    /// Only the user-selected multilingual model is loaded. Keeping both actor
+    /// instances lets the menu switch models without rebuilding the service;
+    /// inactive pipelines are explicitly unloaded after a successful switch.
+    private let smallMultilingual: WhisperKitTranscriber
+    private let largeMultilingual: WhisperKitTranscriber
     private let german: WhisperCppTranscriber
     private var language: TranscriptionLanguage
-    private var languageRequest = 0
+    private var modelPreference: TranscriptionModelPreference
+    private var configurationRequest = 0
     private let explicitModel: (any Transcriber)?
     private let dictionary: CorrectionDictionaryStore
     private var activeTranscriptions = 0
@@ -285,22 +235,33 @@ actor TranscriptionService {
     init(
         model: TranscriptionModel,
         language: TranscriptionLanguage,
+        modelPreference: TranscriptionModelPreference = .small,
         usesExplicitModel: Bool = false,
         dictionary: CorrectionDictionaryStore? = nil
     ) {
-        guard let multilingualModel = ModelRegistry.preferred(for: .automatic),
+        guard let smallModel = ModelRegistry.find(
+                  TranscriptionModelPreference.small.modelID
+              ),
+              let largeModel = ModelRegistry.find(
+                  TranscriptionModelPreference.largeTurbo.modelID
+              ),
               let germanModel = ModelRegistry.preferred(for: .german)
         else {
-            preconditionFailure("Required automatic-routing models are not registered")
+            preconditionFailure("Required transcription models are not registered")
         }
         let dictionary = dictionary ?? CorrectionDictionaryStore()
         self.dictionary = dictionary
-        self.multilingual = WhisperKitTranscriber(
-            model: multilingualModel,
+        self.smallMultilingual = WhisperKitTranscriber(
+            model: smallModel,
+            language: .automatic
+        )
+        self.largeMultilingual = WhisperKitTranscriber(
+            model: largeModel,
             language: .automatic
         )
         self.german = WhisperCppTranscriber(model: germanModel, dictionary: dictionary)
         self.language = language
+        self.modelPreference = modelPreference
         self.explicitModel = usesExplicitModel
             ? Self.makeTranscriber(
                 model: model,
@@ -318,7 +279,10 @@ actor TranscriptionService {
                 await finishLoad()
                 return
             }
-            try await transcriber(for: language).warmUp()
+            try await transcriber(
+                for: language,
+                modelPreference: modelPreference
+            ).warmUp()
             // This only downloads the optional explicit German specialist. It
             // is not loaded into memory and never competes with the active model.
             if language != .german {
@@ -332,8 +296,8 @@ actor TranscriptionService {
     }
 
     func setLanguage(_ language: TranscriptionLanguage) async throws -> String? {
-        languageRequest += 1
-        let request = languageRequest
+        configurationRequest += 1
+        let request = configurationRequest
         if let explicitModel {
             // An explicit model selection is an intentional override. Do not
             // warm a second language model just because the menu setting
@@ -341,7 +305,7 @@ actor TranscriptionService {
             self.language = language
             return explicitModel.modelID
         }
-        let next = transcriber(for: language)
+        let next = transcriber(for: language, modelPreference: modelPreference)
         activeLoads += 1
         do {
             try await next.warmUp()
@@ -349,7 +313,7 @@ actor TranscriptionService {
             activeLoads = max(0, activeLoads - 1)
             throw error
         }
-        guard request == languageRequest else {
+        guard request == configurationRequest else {
             await finishLoad()
             return nil
         }
@@ -359,9 +323,37 @@ actor TranscriptionService {
             prefetchGermanSpecialist()
         }
         await finishLoad()
-        if language == .automatic {
-            return "automatic · one multilingual model"
+        return next.modelID
+    }
+
+    func setModelPreference(
+        _ modelPreference: TranscriptionModelPreference
+    ) async throws -> String? {
+        configurationRequest += 1
+        let request = configurationRequest
+        if let explicitModel {
+            self.modelPreference = modelPreference
+            return explicitModel.modelID
         }
+
+        let next = transcriber(
+            for: language,
+            modelPreference: modelPreference
+        )
+        activeLoads += 1
+        do {
+            try await next.warmUp()
+        } catch {
+            activeLoads = max(0, activeLoads - 1)
+            throw error
+        }
+        guard request == configurationRequest else {
+            await finishLoad()
+            return nil
+        }
+        self.modelPreference = modelPreference
+        cleanupRequested = true
+        await finishLoad()
         return next.modelID
     }
 
@@ -374,27 +366,18 @@ actor TranscriptionService {
             } else {
                 switch language {
                 case .english:
-                    raw = try await multilingual.transcribe(audio, languageCode: "en")
+                    raw = try await multilingual(
+                        for: modelPreference
+                    ).transcribe(audio, languageCode: "en")
                 case .german:
                     raw = try await german.transcribe(audio)
                 case .automatic:
-                    let detection = try await multilingual.detectLanguage(audio)
-                    let route = AutomaticLanguageRouter.route(detection)
-                    let rawScore = detection.logProbabilities[detection.language] ?? -.infinity
-                    FileHandle.standardError.write(Data(
-                        "  detected \(detection.language) · logp \(rawScore) · route \(route) · shared model\n".utf8
-                    ))
-                    // Preserve Whisper's detected language, including languages
-                    // outside the English/German specialist pair. The route is
-                    // retained as a confidence diagnostic, not as a second model
-                    // selection, so Automatic keeps one model resident.
-                    let detectedLanguage = detection.language.isEmpty
-                        ? nil
-                        : detection.language
-                    raw = try await multilingual.transcribe(
-                        audio,
-                        languageCode: detectedLanguage
-                    )
+                    // WhisperKit detects the language and decodes in this one
+                    // call. A separate detection pass produced identical text
+                    // in the local corpus while adding ~1.65 seconds and ~1 GB.
+                    raw = try await multilingual(
+                        for: modelPreference
+                    ).transcribe(audio, languageCode: nil)
                 }
             }
             let result = dictionary.apply(to: raw)
@@ -406,10 +389,22 @@ actor TranscriptionService {
         }
     }
 
-    private func transcriber(for language: TranscriptionLanguage) -> any Transcriber {
+    private func transcriber(
+        for language: TranscriptionLanguage,
+        modelPreference: TranscriptionModelPreference
+    ) -> any Transcriber {
         switch language {
-        case .automatic, .english: multilingual
+        case .automatic, .english: multilingual(for: modelPreference)
         case .german: german
+        }
+    }
+
+    private func multilingual(
+        for modelPreference: TranscriptionModelPreference
+    ) -> WhisperKitTranscriber {
+        switch modelPreference {
+        case .small: smallMultilingual
+        case .largeTurbo: largeMultilingual
         }
     }
 
@@ -459,8 +454,15 @@ actor TranscriptionService {
         switch language {
         case .automatic, .english:
             await german.unload()
+            switch modelPreference {
+            case .small:
+                await largeMultilingual.unload()
+            case .largeTurbo:
+                await smallMultilingual.unload()
+            }
         case .german:
-            await multilingual.unload()
+            await smallMultilingual.unload()
+            await largeMultilingual.unload()
         }
         cleanupRequested = false
     }
@@ -474,7 +476,8 @@ actor TranscriptionService {
         if let explicitModel {
             await explicitModel.unload()
         } else {
-            await multilingual.unload()
+            await smallMultilingual.unload()
+            await largeMultilingual.unload()
             await german.unload()
         }
         memoryPressurePending = false

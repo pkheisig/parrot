@@ -108,7 +108,10 @@ struct Run: ParsableCommand {
             }
             chosenModel = m
         } else {
-            guard let m = ModelRegistry.preferred(for: settings.transcriptionLanguage) else {
+            guard let m = ModelRegistry.preferred(
+                for: settings.transcriptionLanguage,
+                modelPreference: settings.transcriptionModelPreference
+            ) else {
                 FileHandle.standardError.write(Data("no models registered\n".utf8))
                 throw ExitCode(1)
             }
@@ -118,12 +121,11 @@ struct Run: ParsableCommand {
         let transcriptionService = TranscriptionService(
             model: chosenModel,
             language: settings.transcriptionLanguage,
+            modelPreference: settings.transcriptionModelPreference,
             usesExplicitModel: model != nil,
             dictionary: dictionary
         )
-        let readyModelID = model == nil && settings.transcriptionLanguage == .automatic
-            ? "automatic · one multilingual model"
-            : chosenModel.id
+        let readyModelID = chosenModel.id
         let memoryPressureMonitor = RuntimeMemoryPressureMonitor {
             Task {
                 await transcriptionService.handleMemoryPressure()
@@ -178,19 +180,53 @@ struct Run: ParsableCommand {
                 activationMode = mode
             }
             menuBar?.onLanguageChanged = { language in
+                readiness.modelReady = false
                 menuBar?.setLoading(language)
                 Task {
                     do {
                         guard let modelID = try await transcriptionService.setLanguage(language)
                         else { return }
                         await MainActor.run {
-                            menuBar?.setReady(modelID: modelID, language: language)
+                            readiness.modelReady = true
+                            menuBar?.setReady(
+                                modelID: modelID,
+                                language: language,
+                                modelPreference: settings.transcriptionModelPreference
+                            )
                         }
                     } catch {
                         FileHandle.standardError.write(Data(
                             "language model load failed: \(error)\n".utf8
                         ))
                         await MainActor.run {
+                            readiness.modelReady = true
+                            menuBar?.setLanguageError("model load failed · try again")
+                        }
+                    }
+                }
+            }
+            menuBar?.onModelPreferenceChanged = { modelPreference in
+                readiness.modelReady = false
+                menuBar?.setLoading(settings.transcriptionLanguage)
+                Task {
+                    do {
+                        guard let modelID = try await transcriptionService
+                            .setModelPreference(modelPreference)
+                        else { return }
+                        await MainActor.run {
+                            readiness.modelReady = true
+                            menuBar?.setReady(
+                                modelID: modelID,
+                                language: settings.transcriptionLanguage,
+                                modelPreference: modelPreference
+                            )
+                        }
+                    } catch {
+                        FileHandle.standardError.write(Data(
+                            "transcription model load failed: \(error)\n".utf8
+                        ))
+                        await MainActor.run {
+                            readiness.modelReady = true
                             menuBar?.setLanguageError("model load failed · try again")
                         }
                     }
@@ -335,7 +371,8 @@ struct Run: ParsableCommand {
                                 if readiness.modelReady {
                                     menuBar?.setReady(
                                         modelID: readyModelID,
-                                        language: settings.transcriptionLanguage
+                                        language: settings.transcriptionLanguage,
+                                        modelPreference: settings.transcriptionModelPreference
                                     )
                                 } else {
                                     menuBar?.setLoading(settings.transcriptionLanguage)
@@ -369,7 +406,8 @@ struct Run: ParsableCommand {
                     if readiness.monitorStarted {
                         menuBar?.setReady(
                             modelID: readyModelID,
-                            language: settings.transcriptionLanguage
+                            language: settings.transcriptionLanguage,
+                            modelPreference: settings.transcriptionModelPreference
                         )
                     }
                 }

@@ -9,6 +9,7 @@ final class DictationSettingsTests: XCTestCase {
             XCTAssertEqual(settings.learningShortcut, .learnCorrection)
             XCTAssertEqual(settings.activationMode, .hold)
             XCTAssertEqual(settings.transcriptionLanguage, .automatic)
+            XCTAssertEqual(settings.transcriptionModelPreference, .small)
         }
     }
 
@@ -33,27 +34,38 @@ final class DictationSettingsTests: XCTestCase {
             settings.learningShortcut = learningShortcut
             settings.activationMode = .toggle
             settings.transcriptionLanguage = .german
+            settings.transcriptionModelPreference = .largeTurbo
 
             XCTAssertEqual(settings.shortcut, shortcut)
             XCTAssertEqual(settings.learningShortcut, learningShortcut)
             XCTAssertEqual(settings.shortcut.displayName, "⇧⌘Space")
             XCTAssertEqual(settings.activationMode, .toggle)
             XCTAssertEqual(settings.transcriptionLanguage, .german)
+            XCTAssertEqual(settings.transcriptionModelPreference, .largeTurbo)
         }
     }
 
     func testLanguageSelectsCompatibleModelAndDecodeOptions() {
-        let english = ModelRegistry.preferred(for: .english)
-        XCTAssertEqual(english?.id, ModelRegistry.preferred(for: .automatic)?.id)
-        XCTAssertEqual(english?.engine, .whisperKit)
-        XCTAssertTrue(english?.languages.contains("multi") == true)
-        XCTAssertEqual(english?.id, "whisper-large-v3-turbo")
-        XCTAssertEqual(english?.sizeMB, 1_620)
-        XCTAssertEqual(ModelRegistry.find("whisper-large-v3-turbo")?.sizeMB, 1_620)
-        XCTAssertEqual(ModelRegistry.find("whisper-large-v3-quantized")?.sizeMB, 626)
+        let small = ModelRegistry.preferred(for: .english)
+        XCTAssertEqual(small?.id, ModelRegistry.preferred(for: .automatic)?.id)
+        XCTAssertEqual(small?.engine, .whisperKit)
+        XCTAssertTrue(small?.languages.contains("multi") == true)
+        XCTAssertEqual(small?.id, "whisper-small")
+        XCTAssertEqual(small?.sizeMB, 488)
+
+        let large = ModelRegistry.preferred(
+            for: .english,
+            modelPreference: .largeTurbo
+        )
+        XCTAssertEqual(large?.id, "whisper-large-v3-turbo")
+        XCTAssertEqual(large?.sizeMB, 1_620)
         XCTAssertEqual(
-            ModelRegistry.find("whisper-large-v3-turbo-quantized")?.sizeMB,
-            632
+            Set(ModelRegistry.shared.map(\.id)),
+            Set([
+                "whisper-small",
+                "whisper-large-v3-turbo",
+                "whisper-large-v3-turbo-german-q5",
+            ])
         )
         XCTAssertEqual(
             ModelRegistry.preferred(for: .german)?.id,
@@ -82,47 +94,6 @@ final class DictationSettingsTests: XCTestCase {
         XCTAssertGreaterThan(snapshot.physicalFootprintBytes, 0)
         XCTAssertTrue(snapshot.summary.contains("rss="))
         XCTAssertTrue(snapshot.summary.contains("footprint="))
-    }
-
-    func testAutomaticLanguageRoutesOnlyConfidentEnglishAndGerman() {
-        XCTAssertEqual(
-            AutomaticLanguageRouter.route(
-                LanguageDetection(
-                    language: "en",
-                    logProbabilities: ["en": log(0.92), "de": log(0.04)]
-                )
-            ),
-            .english
-        )
-        XCTAssertEqual(
-            AutomaticLanguageRouter.route(
-                LanguageDetection(
-                    language: "de",
-                    logProbabilities: ["en": log(0.03), "de": log(0.94)]
-                )
-            ),
-            .german
-        )
-        XCTAssertEqual(
-            AutomaticLanguageRouter.route(
-                LanguageDetection(
-                    language: "en",
-                    logProbabilities: ["en": log(0.40), "de": log(0.35)]
-                )
-            ),
-            .german
-        )
-        XCTAssertEqual(
-            AutomaticLanguageRouter.route(
-                LanguageDetection(
-                    language: "fr",
-                    logProbabilities: [
-                        "en": log(0.04), "de": log(0.03), "fr": log(0.90),
-                    ]
-                )
-            ),
-            .multilingualFallback
-        )
     }
 
     func testGermanSpecialistHasPinnedDownloadMetadata() {

@@ -35,6 +35,25 @@ enum TranscriptionLanguage: String, CaseIterable, Codable {
     }
 }
 
+enum TranscriptionModelPreference: String, CaseIterable, Codable {
+    case small
+    case largeTurbo
+
+    var displayName: String {
+        switch self {
+        case .small: "Whisper Small"
+        case .largeTurbo: "Large Turbo"
+        }
+    }
+
+    var modelID: String {
+        switch self {
+        case .small: "whisper-small"
+        case .largeTurbo: "whisper-large-v3-turbo"
+        }
+    }
+}
+
 struct HotkeyShortcut: Codable, Equatable {
     let keyCode: CGKeyCode
     let modifiersRawValue: UInt64
@@ -120,6 +139,7 @@ final class DictationSettings {
         static let learningShortcut = "learningShortcut"
         static let activationMode = "activationMode"
         static let transcriptionLanguage = "transcriptionLanguage"
+        static let transcriptionModelPreference = "transcriptionModelPreference"
     }
 
     private let defaults: UserDefaults
@@ -181,6 +201,20 @@ final class DictationSettings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Key.transcriptionLanguage)
+        }
+    }
+
+    var transcriptionModelPreference: TranscriptionModelPreference {
+        get {
+            guard let rawValue = defaults.string(
+                forKey: Key.transcriptionModelPreference
+            ),
+            let preference = TranscriptionModelPreference(rawValue: rawValue)
+            else { return .small }
+            return preference
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Key.transcriptionModelPreference)
         }
     }
 }

@@ -7,12 +7,12 @@
 3. **Minimal recording feedback.** A small floating pill at the bottom of the screen while recording, so the user knows the mic is hot. Click-through, borderless, hidden when idle.
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Memory-aware local inference.** Automatic detection and transcription use
-   one multilingual model; model weights warm in the background at app startup,
-   stay resident for fast repeated use, and release explicitly under memory
-   pressure or language changes.
+   one multilingual model; Whisper Small is the default, model weights warm in
+   the background at app startup, stay resident for fast repeated use, and
+   release explicitly under memory pressure or configuration changes.
 6. **Language-specialized models.** German remains an explicit specialist for
-   users who select German directly; quantized Large variants remain selectable
-   as per-device candidates.
+   users who select German directly; full-size Large Turbo is available only as
+   an explicit model selection.
 7. **Learned vocabulary.** Compare the last inserted transcript with the user's
    in-place correction and persist a universal alias-to-canonical mapping.
 8. **Native and lean.** One Swift Package executable target. No sidecar processes. No HTTP servers.
@@ -92,12 +92,10 @@ Global hotkey via `CGEventTap` (requires Accessibility permission). Default: **h
 
 ### `AudioCapture`
 
-`AVAudioEngine` records 16 kHz mono `Float32` audio. Automatic and German modes
-hand the completed buffer to the active transcriber. Fixed English mode uses
-WhisperKit's live audio processor: it confirms segments privately during the
-recording, cancels any stale in-flight whole-buffer pass on release, and
-re-decodes only a short overlap plus the unresolved tail before injection.
-Escape stops either capture path and discards all partial text.
+`AVAudioEngine` records 16 kHz mono `Float32` audio. Every mode hands the complete
+buffer to the active transcriber only after recording stops. This retains the
+full utterance context and prevents a provisional streaming decode from
+truncating the last words. Escape stops capture and discards the recording.
 
 ### `Transcriber` (protocol)
 
@@ -113,30 +111,29 @@ protocol Transcriber {
 Concrete implementations:
 
 - `WhisperKitTranscriber` — wraps WhisperKit for the shared multilingual
-  detector/decoder, default full-size path, and explicit quantized candidates.
-  CoreML/Metal-accelerated on the pinned compute path.
+  detector/decoder. Whisper Small is the default and full-size Large Turbo is
+  an explicit menu/CLI selection. CoreML/Metal-accelerated on the pinned compute
+  path.
 - `WhisperCppTranscriber` — wraps the official whisper.cpp XCFramework for the
   German fine-tuned GGML model. Metal-accelerated.
 
-`TranscriptionService` owns the language router and model lifecycle. Automatic
-mode detects the language from the finished recording, logs the existing
-English/German confidence route, and then decodes with the same multilingual
-pipeline using the detected language code. It therefore does not retain a
-separate detector or specialist during Automatic mode. Selecting German
-explicitly uses the pinned whisper.cpp specialist.
+`TranscriptionService` owns the language/model selection and lifecycle.
+Automatic mode asks the selected multilingual WhisperKit pipeline to detect and
+transcribe in one decode. It does not retain a separate detector or specialist.
+Selecting German explicitly uses the pinned whisper.cpp specialist.
 
 Every language mode records the complete utterance before starting one
-full-context transcription. In Automatic mode, the finished recording first
-goes through language detection and then a second decode on the same
-multilingual pipeline. No provisional streaming segment can become part of the
+full-context transcription. In Automatic mode, language detection is part of
+that same decode. No provisional streaming segment can become part of the
 delivered transcript.
 
 WhisperKit warm-up includes three discarded seconds of silence after model
 loading. This forces Core ML to compile its inference graphs before a model is
 reported ready, without conditioning or retaining any priming transcript. The
-app-bundle path does this lazily on the first transcription; the foreground CLI
-still warms before entering its monitoring loop. The selected model remains
-resident until the app exits; `WhisperKit.unloadModels()` or `whisper_free` is
+app bundle does this in a background startup task; the foreground CLI blocks
+until warm-up completes before entering its monitoring loop. The selected model
+remains resident until the app exits; `WhisperKit.unloadModels()` or
+`whisper_free` is
 called when a pipeline becomes inactive after a language change, or when
 memory pressure requires release. Memory pressure defers release until an
 active decode completes.
@@ -235,7 +232,9 @@ enum Engine: String, Codable { case whisperKit, parakeet }
 The registry lives in `ModelRegistry.swift`; no sidecar resource is required.
 Adding an engine requires a new `Transcriber` conformance and an `Engine` case.
 
-The registry is the single source of truth for: download URLs, file names, sizes, recommended flags, what shows up in `parrot models list`, and the quantized/full-size fallback choices.
+The registry is the single source of truth for download URLs, file names, sizes,
+recommended flags, what shows up in `parrot models list`, and the selectable
+Small/Large Turbo choices.
 
 ### `ModelDownloader`
 
@@ -244,19 +243,23 @@ pinned German GGML asset to `~/Library/Application Support/Parrot/Models/`,
 verifies its SHA-256 digest, and coalesces concurrent requests. The app only
 prefetches the optional German specialist when the foreground CLI or a language
 switch requests it; prefetching downloads to disk but does not load that model
-into RAM. The active multilingual model is selected from the WhisperKit
-hardware catalog, with the full Turbo checkpoint retained as an explicit
-fallback.
+into RAM. The active multilingual model follows the persisted menu selection:
+Small by default or full Large Turbo when explicitly selected.
 
 ### `DictationSettings`
 
-Persists the shortcut, activation mode, and language in the legacy
-`com.digimata.parrot` user-defaults suite so the clean 0.2 app identity keeps
-existing user settings. Defaults remain Fn + Hold + Automatic.
+Persists the shortcut, activation mode, language, and multilingual model choice
+in the legacy `com.digimata.parrot` user-defaults suite so the clean 0.2 app
+identity keeps existing user settings. Defaults remain Fn + Hold + Automatic +
+Whisper Small.
 
 ### `MenuBarController`
 
-Owns the status item and transient AppKit popover. It displays current state/model, records shortcut combinations or modifier-only keys, switches between Hold and Toggle behavior, controls the `SMAppService.mainApp` launch-at-login registration, and provides Quit.
+Owns the status item and transient AppKit popover. It displays current
+state/model, records shortcut combinations or modifier-only keys, switches
+between Hold and Toggle behavior, selects Small or Large Turbo for multilingual
+modes, controls the `SMAppService.mainApp` launch-at-login registration, and
+provides Quit.
 
 ## Permissions
 
@@ -281,11 +284,9 @@ Initial registry:
 
 | Engine | Model | Size | Notes |
 |---|---|---|---|
-| WhisperKit | `whisper-large-v3-quantized` | ~626 MB | Quantized Large candidate; benchmark per device |
-| WhisperKit | `whisper-large-v3-turbo-quantized` | ~632 MB | Quantized Turbo choice where the hardware catalog advertises it |
-| WhisperKit | `whisper-large-v3-turbo` | ~1.62 GB | Default full-size multilingual quality path |
+| WhisperKit | `whisper-small` | ~488 MB | Default for English and Automatic |
+| WhisperKit | `whisper-large-v3-turbo` | ~1.62 GB | Manual high-quality multilingual selection |
 | whisper.cpp | `whisper-large-v3-turbo-german-q5` | ~548 MB | German specialist |
-| WhisperKit | `whisper-base.en` | ~145 MB | Optional compact English CLI model |
 
 Models are not bundled. WhisperKit uses its own cache; the German GGML model
 lives under `~/Library/Application Support/Parrot/Models/`.
@@ -301,17 +302,15 @@ lives under `~/Library/Application Support/Parrot/Models/`.
 7. User releases Fn.
 8. `HotkeyMonitor` fires `.released`. Overlay switches to spinner. Status: `transcribing`.
 9. `AudioCapture` stops and hands the buffer to `TranscriptionService`.
-10. Automatic mode detects the language and decodes with the same multilingual
-    model using the detected language code.
+10. Automatic mode detects the language and transcribes in one decode with the
+    selected multilingual model.
 11. `TextInjector` posts the string at the cursor.
 12. Overlay hides. Status: `listening`. Loop.
 13. User chooses **Quit Parrot** from the menu-bar popover.
 
-English and Automatic share the full Turbo multilingual model by default. The
-quantized Large variants are explicit per-device candidates because smaller
-download size did not lower this M1 Pro's measured physical footprint. The
-German specialist trades additional disk/RAM residency when that language is
-selected directly.
+English and Automatic share Whisper Small by default. Large Turbo is used only
+when selected manually. The German specialist replaces the multilingual model
+in memory when German is selected directly.
 
 ## What we are deliberately NOT building
 

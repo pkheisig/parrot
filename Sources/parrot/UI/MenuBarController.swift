@@ -10,6 +10,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     var onLearningShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
     var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
+    var onModelPreferenceChanged: ((TranscriptionModelPreference) -> Void)?
 
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
@@ -32,6 +33,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             learningShortcut: settings.learningShortcut,
             activationMode: settings.activationMode,
             language: settings.transcriptionLanguage,
+            modelPreference: settings.transcriptionModelPreference,
             dictionaryCount: dictionary.entries.count
         )
         super.init()
@@ -70,6 +72,11 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             self.settings.transcriptionLanguage = language
             self.onLanguageChanged?(language)
         }
+        contentController.onModelPreferenceChanged = { [weak self] preference in
+            guard let self else { return }
+            self.settings.transcriptionModelPreference = preference
+            self.onModelPreferenceChanged?(preference)
+        }
         contentController.onLearningShortcutChanged = { [weak self] shortcut in
             guard let self else { return }
             guard shortcut != self.settings.shortcut else {
@@ -90,7 +97,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 340, height: 382)
+        popover.contentSize = NSSize(width: 340, height: 420)
         popover.contentViewController = contentController
         popover.delegate = self
 
@@ -178,21 +185,31 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     func setLoading(_ language: TranscriptionLanguage) {
-        contentController.setLanguageEnabled(false)
+        contentController.setConfigurationEnabled(false, language: language)
         contentController.setState("loading \(language.displayName.lowercased()) model…")
     }
 
-    func setReady(modelID: String, language: TranscriptionLanguage) {
+    func setReady(
+        modelID: String,
+        language: TranscriptionLanguage,
+        modelPreference: TranscriptionModelPreference
+    ) {
         settings.transcriptionLanguage = language
-        contentController.setLanguageEnabled(true)
+        settings.transcriptionModelPreference = modelPreference
+        contentController.setConfigurationEnabled(true, language: language)
         contentController.setLanguage(language)
+        contentController.setModelPreference(modelPreference)
         contentController.setModel(modelID)
         contentController.setState(idleText)
     }
 
     func setLanguageError(_ message: String) {
-        contentController.setLanguageEnabled(true)
+        contentController.setConfigurationEnabled(
+            true,
+            language: settings.transcriptionLanguage
+        )
         contentController.setLanguage(settings.transcriptionLanguage)
+        contentController.setModelPreference(settings.transcriptionModelPreference)
         contentController.setState(message)
     }
 
@@ -251,6 +268,7 @@ private final class SettingsViewController: NSViewController {
     var onLearningShortcutChanged: ((HotkeyShortcut) -> Void)?
     var onActivationModeChanged: ((ActivationMode) -> Void)?
     var onLanguageChanged: ((TranscriptionLanguage) -> Void)?
+    var onModelPreferenceChanged: ((TranscriptionModelPreference) -> Void)?
     var onOpenDictionary: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -269,6 +287,7 @@ private final class SettingsViewController: NSViewController {
     private let loginCheckbox = NSButton()
     private let loginStatusLabel = NSTextField(labelWithString: "")
     private let languagePopup = NSPopUpButton()
+    private let modelPopup = NSPopUpButton()
 
     init(
         modelID: String,
@@ -276,6 +295,7 @@ private final class SettingsViewController: NSViewController {
         learningShortcut: HotkeyShortcut,
         activationMode: ActivationMode,
         language: TranscriptionLanguage,
+        modelPreference: TranscriptionModelPreference,
         dictionaryCount: Int
     ) {
         super.init(nibName: nil, bundle: nil)
@@ -318,6 +338,15 @@ private final class SettingsViewController: NSViewController {
         languagePopup.action = #selector(languageChanged)
         let languageRow = Self.row(label: "Language", control: languagePopup)
 
+        modelPopup.addItems(
+            withTitles: TranscriptionModelPreference.allCases.map(\.displayName)
+        )
+        setModelPreference(modelPreference)
+        modelPopup.isEnabled = language != .german
+        modelPopup.target = self
+        modelPopup.action = #selector(modelPreferenceChanged)
+        let modelRow = Self.row(label: "Model", control: modelPopup)
+
         dictionaryButton.bezelStyle = .rounded
         dictionaryButton.target = self
         dictionaryButton.action = #selector(openDictionary)
@@ -353,7 +382,7 @@ private final class SettingsViewController: NSViewController {
 
         let stack = NSStackView(views: [
             title, stateLabel, modelLabel, shortcutRow, learningRow, modeRow,
-            languageRow, dictionaryRow, loginRow, separator, quitButton,
+            languageRow, modelRow, dictionaryRow, loginRow, separator, quitButton,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -380,6 +409,7 @@ private final class SettingsViewController: NSViewController {
             learningRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             modeRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             languageRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            modelRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             dictionaryRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             loginRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             separator.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -404,8 +434,18 @@ private final class SettingsViewController: NSViewController {
         )
     }
 
-    func setLanguageEnabled(_ enabled: Bool) {
+    func setModelPreference(_ preference: TranscriptionModelPreference) {
+        modelPopup.selectItem(
+            at: TranscriptionModelPreference.allCases.firstIndex(of: preference) ?? 0
+        )
+    }
+
+    func setConfigurationEnabled(
+        _ enabled: Bool,
+        language: TranscriptionLanguage
+    ) {
         languagePopup.isEnabled = enabled
+        modelPopup.isEnabled = enabled && language != .german
     }
 
     func setShortcut(_ shortcut: HotkeyShortcut) {
@@ -447,6 +487,12 @@ private final class SettingsViewController: NSViewController {
         let languages = TranscriptionLanguage.allCases
         guard languages.indices.contains(languagePopup.indexOfSelectedItem) else { return }
         onLanguageChanged?(languages[languagePopup.indexOfSelectedItem])
+    }
+
+    @objc private func modelPreferenceChanged() {
+        let preferences = TranscriptionModelPreference.allCases
+        guard preferences.indices.contains(modelPopup.indexOfSelectedItem) else { return }
+        onModelPreferenceChanged?(preferences[modelPopup.indexOfSelectedItem])
     }
 
     @objc private func openDictionary() {

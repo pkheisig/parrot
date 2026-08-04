@@ -73,21 +73,18 @@ Entries are stored locally at
 `~/Library/Application Support/Parrot/Dictionary/corrections.json`.
 
 The **Language** setting supports English, German, or Automatic recognition.
-Automatic and English now share one multilingual Whisper Large model: it detects
-the language and performs the final decode through the same loaded pipeline. On
-this M1 Pro, full Turbo remains the default quality-preserving choice: its
-measured physical footprint was about 2.2 GB at peak, versus about 3.7 GB for
-the 626 MB quantized candidate during Core ML specialization. Both quantized
-Large artifacts remain registered for explicit per-device benchmarking. German
-remains available as an explicit 548 MB whisper.cpp specialist. This avoids
-keeping a detector, English model, and German model resident at the same time.
+English and Automatic use multilingual **Whisper Small** by default. Automatic
+detects the language and produces the transcript in one decode; it does not run
+a separate detector pass. Select **Large Turbo** in the **Model** setting when
+you explicitly want the slower 1.62 GB quality model. German remains an explicit
+548 MB whisper.cpp specialist and ignores the multilingual model selection.
 
-The app loads the model lazily when the first recording is transcribed, then
-keeps the selected model hot for the rest of the app session. It explicitly
-releases an inactive language pipeline when you switch languages. macOS memory
-pressure remains the emergency unload path; a later dictation then reloads and
-re-primes the cached model. Audio remains on the Mac; only model downloads use
-the network.
+The app downloads, loads, and primes the selected model in the background at
+startup, then keeps it hot for fast repeated dictation. Only one inference model
+is kept resident: switching the language or model loads the replacement before
+releasing the inactive pipeline. macOS memory pressure remains the emergency
+unload path; a later dictation then reloads and re-primes the cached model. Audio
+remains on the Mac; only model downloads use the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
@@ -101,7 +98,7 @@ parrot install --uninstall             # remove the LaunchAgent
 parrot doctor                          # check permissions + fn key setting
 parrot models list                     # list available models
 parrot models download <id>            # pre-download a model
-parrot --model whisper-large-v3-turbo  # full-size multilingual quality path
+parrot --model whisper-large-v3-turbo  # manually choose the large quality path
 parrot --no-overlay                    # disable the bottom-of-screen pill
 ```
 
