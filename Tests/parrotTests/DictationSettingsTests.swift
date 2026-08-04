@@ -43,18 +43,21 @@ final class DictationSettingsTests: XCTestCase {
     }
 
     func testLanguageSelectsCompatibleModelAndDecodeOptions() {
+        let english = ModelRegistry.preferred(for: .english)
+        XCTAssertEqual(english?.id, ModelRegistry.preferred(for: .automatic)?.id)
+        XCTAssertEqual(english?.engine, .whisperKit)
+        XCTAssertTrue(english?.languages.contains("multi") == true)
+        XCTAssertEqual(english?.id, "whisper-large-v3-turbo")
+        XCTAssertEqual(english?.sizeMB, 1_620)
+        XCTAssertEqual(ModelRegistry.find("whisper-large-v3-turbo")?.sizeMB, 1_620)
+        XCTAssertEqual(ModelRegistry.find("whisper-large-v3-quantized")?.sizeMB, 626)
         XCTAssertEqual(
-            ModelRegistry.preferred(for: .english)?.id,
-            "whisper-large-v3-turbo"
+            ModelRegistry.find("whisper-large-v3-turbo-quantized")?.sizeMB,
+            632
         )
-        XCTAssertEqual(ModelRegistry.preferred(for: .english)?.sizeMB, 1_620)
         XCTAssertEqual(
             ModelRegistry.preferred(for: .german)?.id,
             "whisper-large-v3-turbo-german-q5"
-        )
-        XCTAssertEqual(
-            ModelRegistry.preferred(for: .automatic)?.id,
-            "whisper-small"
         )
 
         let automatic = WhisperKitTranscriber.decodingOptions(for: .automatic)
@@ -64,6 +67,21 @@ final class DictationSettingsTests: XCTestCase {
         let german = WhisperKitTranscriber.decodingOptions(for: .german)
         XCTAssertFalse(german.detectLanguage)
         XCTAssertEqual(german.language, "de")
+
+        let detectedGerman = WhisperKitTranscriber.decodingOptions(languageCode: "de")
+        XCTAssertFalse(detectedGerman.detectLanguage)
+        XCTAssertEqual(detectedGerman.language, "de")
+    }
+
+    func testProcessMemorySnapshotIncludesPhysicalFootprint() {
+        guard let snapshot = ProcessMemorySnapshot.current() else {
+            XCTFail("task_info should return a process memory snapshot")
+            return
+        }
+        XCTAssertGreaterThan(snapshot.residentBytes, 0)
+        XCTAssertGreaterThan(snapshot.physicalFootprintBytes, 0)
+        XCTAssertTrue(snapshot.summary.contains("rss="))
+        XCTAssertTrue(snapshot.summary.contains("footprint="))
     }
 
     func testAutomaticLanguageRoutesOnlyConfidentEnglishAndGerman() {

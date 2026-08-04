@@ -73,15 +73,21 @@ Entries are stored locally at
 `~/Library/Application Support/Parrot/Dictionary/corrections.json`.
 
 The **Language** setting supports English, German, or Automatic recognition.
-Automatic first uses the stronger 488 MB multilingual Whisper Small model to detect the
-language. Confident English is then transcribed with the English-specific
-Whisper Large v3 Turbo model; confident German is transcribed with the German-specific
-Whisper Large v3 Turbo Q5 model. Other or ambiguous languages fall back to the
-multilingual model. The English (~1.62 GB) and German (~548 MB) specialists are
-prefetched in the background on first app launch and cached locally. The active
-WhisperKit model also runs one discarded inference during startup, moving Core
-ML compilation out of the first real dictation. Audio remains on the Mac; only
-model downloads use the network.
+Automatic and English now share one multilingual Whisper Large model: it detects
+the language and performs the final decode through the same loaded pipeline. On
+this M1 Pro, full Turbo remains the default quality-preserving choice: its
+measured physical footprint was about 2.2 GB at peak, versus about 3.7 GB for
+the 626 MB quantized candidate during Core ML specialization. Both quantized
+Large artifacts remain registered for explicit per-device benchmarking. German
+remains available as an explicit 548 MB whisper.cpp specialist. This avoids
+keeping a detector, English model, and German model resident at the same time.
+
+The app loads the model lazily when the first recording is transcribed, keeps it
+hot for roughly 60 seconds after the last job, then explicitly releases the
+Core ML/Metal weights. macOS memory pressure releases them sooner. A dictation
+after eviction may take longer while the model is loaded and Core ML is primed;
+repeated dictations inside the idle window stay warm. Audio remains on the Mac;
+only model downloads use the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 
@@ -95,9 +101,20 @@ parrot install --uninstall             # remove the LaunchAgent
 parrot doctor                          # check permissions + fn key setting
 parrot models list                     # list available models
 parrot models download <id>            # pre-download a model
-parrot --model whisper-large-v3-turbo  # bigger, multilingual, slower first-run
+parrot --model whisper-large-v3-turbo  # full-size multilingual quality path
 parrot --no-overlay                    # disable the bottom-of-screen pill
 ```
+
+To compare model memory, latency, and output on local recordings:
+
+```sh
+bash scripts/benchmark-models.sh /path/to/recording.wav
+```
+
+The benchmark preserves all model files and prints the `memory ... peak ...`
+measurements emitted by Parrot. A speech corpus is required to make a quality
+claim; the script does not treat latency or model metadata as a transcription
+accuracy result.
 
 ## Stack
 

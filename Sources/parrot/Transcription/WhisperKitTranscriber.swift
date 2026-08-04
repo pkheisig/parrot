@@ -5,8 +5,9 @@ import WhisperKit
 actor WhisperKitTranscriber: Transcriber {
     let modelID: String
     private let model: TranscriptionModel
-    private let language: TranscriptionLanguage
+    private let defaultLanguage: TranscriptionLanguage
     private var pipeline: WhisperKit?
+    private var loadTask: Task<Void, Error>?
 
     init(
         model: TranscriptionModel,
@@ -15,7 +16,7 @@ actor WhisperKitTranscriber: Transcriber {
         self.modelID = model.id
         self.model = model
         // English-only checkpoints cannot perform language detection.
-        self.language = model.languages.contains("multi") ? language : .english
+        self.defaultLanguage = model.languages.contains("multi") ? language : .english
     }
 
     /// Loads the model into memory; downloads first if not already on disk, then
@@ -23,9 +24,30 @@ actor WhisperKitTranscriber: Transcriber {
     /// user's first dictation.
     func warmUp() async throws {
         if pipeline != nil { return }
+        if let loadTask {
+            try await loadTask.value
+            return
+        }
+        let loadTask = Task { [self] in
+            try await loadPipeline()
+        }
+        self.loadTask = loadTask
+        do {
+            try await loadTask.value
+            self.loadTask = nil
+        } catch {
+            self.loadTask = nil
+            throw error
+        }
+    }
+
+    private func loadPipeline() async throws {
+        if pipeline != nil { return }
         guard let whisperKitID = model.whisperKitID else {
             throw TranscriberError.missingEngineID
         }
+        let memory = MemoryPeakTracker(label: "load \(model.id)")
+        defer { memory.logFinish() }
         FileHandle.standardError.write(Data("loading \(model.id)...\n".utf8))
         // `prewarm` loads every CoreML model twice. That reduces peak memory,
         // but turns Large models into a multi-minute startup gate. A menu-bar
@@ -54,7 +76,7 @@ actor WhisperKitTranscriber: Transcriber {
         let inferenceStarted = Date()
         _ = try await loadedPipeline.transcribe(
             audioArray: Self.inferenceWarmUpAudio,
-            decodeOptions: Self.decodingOptions(for: language)
+            decodeOptions: Self.decodingOptions(for: defaultLanguage)
         )
         let inferenceElapsed = Date().timeIntervalSince(inferenceStarted)
         FileHandle.standardError.write(Data(
@@ -75,12 +97,21 @@ actor WhisperKitTranscriber: Transcriber {
     )
 
     func transcribe(_ audio: [Float]) async throws -> String {
+        try await transcribe(audio, languageCode: defaultLanguage.languageCode)
+    }
+
+    /// Transcribes with a caller-selected language on the shared multilingual
+    /// pipeline. Automatic routing uses this to detect and transcribe with one
+    /// loaded model instead of keeping a separate detector resident.
+    func transcribe(_ audio: [Float], languageCode: String?) async throws -> String {
         if pipeline == nil { try await warmUp() }
         guard let pipeline else { throw TranscriberError.notLoaded }
 
+        let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
+        defer { memory.logFinish() }
         let results = try await pipeline.transcribe(
             audioArray: audio,
-            decodeOptions: Self.decodingOptions(for: language)
+            decodeOptions: Self.decodingOptions(languageCode: languageCode)
         )
         let raw = results.map(\.text).joined(separator: " ")
         let sanitized = Self.sanitize(raw)
@@ -95,6 +126,8 @@ actor WhisperKitTranscriber: Transcriber {
     func detectLanguage(_ audio: [Float]) async throws -> LanguageDetection {
         if pipeline == nil { try await warmUp() }
         guard let pipeline else { throw TranscriberError.notLoaded }
+        let memory = MemoryPeakTracker(label: "detect (model.id)")
+        defer { memory.logFinish() }
         let result = try await pipeline.detectLangauge(audioArray: audio)
         return LanguageDetection(
             language: result.language,
@@ -102,8 +135,18 @@ actor WhisperKitTranscriber: Transcriber {
         )
     }
 
-    func unload() {
+    func isLoaded() -> Bool {
+        pipeline != nil
+    }
+
+    func unload() async {
+        guard let loadedPipeline = pipeline else { return }
+        // WhisperKit exposes an explicit lifecycle operation. Calling it
+        // before dropping the pipeline releases Core ML model weights now,
+        // rather than waiting for ARC/deinitialization to unwind later.
+        await loadedPipeline.unloadModels()
         pipeline = nil
+        RuntimeMemoryLog.write("unloaded \(model.id)")
     }
 
     static func downloadModel(_ model: TranscriptionModel) async throws {
@@ -117,21 +160,23 @@ actor WhisperKitTranscriber: Transcriber {
     }
 
     static func decodingOptions(for language: TranscriptionLanguage) -> DecodingOptions {
-        switch language {
-        case .automatic:
-            return DecodingOptions(
-                task: .transcribe,
-                usePrefillPrompt: true,
-                detectLanguage: true
-            )
-        case .english, .german:
-            return DecodingOptions(
-                task: .transcribe,
-                language: language.languageCode,
-                usePrefillPrompt: true,
-                detectLanguage: false
-            )
-        }
+        Self.decodingOptions(
+            languageCode: language.languageCode,
+            detectLanguage: language == .automatic
+        )
+    }
+
+    static func decodingOptions(
+        languageCode: String?,
+        detectLanguage: Bool? = nil
+    ) -> DecodingOptions {
+        let shouldDetect = detectLanguage ?? (languageCode == nil)
+        return DecodingOptions(
+            task: .transcribe,
+            language: languageCode,
+            usePrefillPrompt: true,
+            detectLanguage: shouldDetect
+        )
     }
 
     /// Strip Whisper's non-speech bracket tokens ([BLANK_AUDIO], [MUSIC],
@@ -223,13 +268,24 @@ enum AutomaticLanguageRouter {
 }
 
 actor TranscriptionService {
-    private let detector: WhisperKitTranscriber
-    private let english: WhisperKitTranscriber
+    /// Automatic and English share one multilingual model. Language detection
+    /// and the final decode are separate calls, but they use the same loaded
+    /// pipeline so Automatic does not keep a detector beside a Large model.
+    private let multilingual: WhisperKitTranscriber
     private let german: WhisperCppTranscriber
     private var language: TranscriptionLanguage
     private var languageRequest = 0
     private let explicitModel: (any Transcriber)?
     private let dictionary: CorrectionDictionaryStore
+    private var activeTranscriptions = 0
+    private var activeLoads = 0
+    private var idleEvictionTask: Task<Void, Never>?
+    private var cleanupRequested = false
+    private var memoryPressurePending = false
+
+    /// Keeping a model hot for a short idle window makes repeated dictation
+    /// responsive without retaining hundreds of megabytes indefinitely.
+    static let idleEvictionNanoseconds: UInt64 = 60 * 1_000_000_000
 
     init(
         model: TranscriptionModel,
@@ -237,21 +293,16 @@ actor TranscriptionService {
         usesExplicitModel: Bool = false,
         dictionary: CorrectionDictionaryStore? = nil
     ) {
-        guard let detectorModel = ModelRegistry.preferred(for: .automatic),
-              let englishModel = ModelRegistry.preferred(for: .english),
+        guard let multilingualModel = ModelRegistry.preferred(for: .automatic),
               let germanModel = ModelRegistry.preferred(for: .german)
         else {
             preconditionFailure("Required automatic-routing models are not registered")
         }
         let dictionary = dictionary ?? CorrectionDictionaryStore()
         self.dictionary = dictionary
-        self.detector = WhisperKitTranscriber(
-            model: detectorModel,
+        self.multilingual = WhisperKitTranscriber(
+            model: multilingualModel,
             language: .automatic
-        )
-        self.english = WhisperKitTranscriber(
-            model: englishModel,
-            language: .english
         )
         self.german = WhisperCppTranscriber(model: germanModel, dictionary: dictionary)
         self.language = language
@@ -265,67 +316,212 @@ actor TranscriptionService {
     }
 
     func warmUp() async throws {
-        if let explicitModel {
-            try await explicitModel.warmUp()
-            return
+        cancelIdleEviction()
+        activeLoads += 1
+        do {
+            if let explicitModel {
+                try await explicitModel.warmUp()
+                await finishLoad()
+                return
+            }
+            try await transcriber(for: language).warmUp()
+            // This only downloads the optional explicit German specialist. It
+            // is not loaded into memory and never competes with the active model.
+            if language != .german {
+                prefetchGermanSpecialist()
+            }
+            await finishLoad()
+        } catch {
+            activeLoads = max(0, activeLoads - 1)
+            throw error
         }
-        try await transcriber(for: language).warmUp()
-        // Every app installation gets both specialists in the background.
-        // The active language is usable before these downloads finish, except
-        // when that specialist is itself the active selection.
-        prefetchAutomaticSpecialists()
     }
 
     func setLanguage(_ language: TranscriptionLanguage) async throws -> String? {
         languageRequest += 1
         let request = languageRequest
+        cancelIdleEviction()
+        if let explicitModel {
+            // An explicit model selection is an intentional override. Do not
+            // warm a second language model just because the menu setting
+            // changes; that would defeat the single-resident-model guarantee.
+            self.language = language
+            scheduleIdleEviction()
+            return explicitModel.modelID
+        }
         let next = transcriber(for: language)
-        try await next.warmUp()
-        guard request == languageRequest else { return nil }
+        activeLoads += 1
+        do {
+            try await next.warmUp()
+        } catch {
+            activeLoads = max(0, activeLoads - 1)
+            throw error
+        }
+        guard request == languageRequest else {
+            await finishLoad()
+            return nil
+        }
         self.language = language
+        cleanupRequested = true
+        if language != .german {
+            prefetchGermanSpecialist()
+        }
+        await finishLoad()
         if language == .automatic {
-            prefetchAutomaticSpecialists()
-            return "automatic · English/German specialists"
+            return "automatic · one multilingual model"
         }
         return next.modelID
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
-        let raw: String
-        if let explicitModel {
-            raw = try await explicitModel.transcribe(audio)
-        } else {
-            switch language {
-            case .english:
-                raw = try await english.transcribe(audio)
-            case .german:
-                raw = try await german.transcribe(audio)
-            case .automatic:
-                let detection = try await detector.detectLanguage(audio)
-                let route = AutomaticLanguageRouter.route(detection)
-                let rawScore = detection.logProbabilities[detection.language] ?? -.infinity
-                FileHandle.standardError.write(Data(
-                    "  detected \(detection.language) · logp \(rawScore) · route \(route)\n".utf8
-                ))
-                switch route {
+        cancelIdleEviction()
+        activeTranscriptions += 1
+        do {
+            let raw: String
+            if let explicitModel {
+                raw = try await explicitModel.transcribe(audio)
+            } else {
+                switch language {
                 case .english:
-                    raw = try await english.transcribe(audio)
+                    raw = try await multilingual.transcribe(audio, languageCode: "en")
                 case .german:
                     raw = try await german.transcribe(audio)
-                case .multilingualFallback:
-                    raw = try await detector.transcribe(audio)
+                case .automatic:
+                    let detection = try await multilingual.detectLanguage(audio)
+                    let route = AutomaticLanguageRouter.route(detection)
+                    let rawScore = detection.logProbabilities[detection.language] ?? -.infinity
+                    FileHandle.standardError.write(Data(
+                        "  detected \(detection.language) · logp \(rawScore) · route \(route) · shared model\n".utf8
+                    ))
+                    // Preserve Whisper's detected language, including languages
+                    // outside the English/German specialist pair. The route is
+                    // retained as a confidence diagnostic, not as a second model
+                    // selection, so Automatic keeps one model resident.
+                    let detectedLanguage = detection.language.isEmpty
+                        ? nil
+                        : detection.language
+                    raw = try await multilingual.transcribe(
+                        audio,
+                        languageCode: detectedLanguage
+                    )
                 }
             }
+            let result = dictionary.apply(to: raw)
+            await finishTranscription()
+            return result
+        } catch {
+            await finishTranscription()
+            throw error
         }
-        return dictionary.apply(to: raw)
     }
 
     private func transcriber(for language: TranscriptionLanguage) -> any Transcriber {
         switch language {
-        case .automatic: detector
-        case .english: english
+        case .automatic, .english: multilingual
         case .german: german
         }
+    }
+
+    /// Called by the menu-bar process when macOS reports memory pressure.
+    /// During a decode we defer release until the active operation has finished.
+    func handleMemoryPressure() async {
+        cancelIdleEviction()
+        if activeTranscriptions > 0 || activeLoads > 0 {
+            memoryPressurePending = true
+            cleanupRequested = true
+            return
+        }
+        await unloadAll()
+    }
+
+    /// Exposed for cancellation/shutdown paths and for tests that want to
+    /// exercise the lifecycle without waiting for the idle timeout.
+    func scheduleIdleEviction() {
+        cancelIdleEviction()
+        idleEvictionTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.idleEvictionNanoseconds)
+            } catch {
+                return
+            }
+            await self?.evictIfIdle()
+        }
+    }
+
+    private func finishTranscription() async {
+        activeTranscriptions = max(0, activeTranscriptions - 1)
+        guard activeTranscriptions == 0, activeLoads == 0 else { return }
+
+        if memoryPressurePending {
+            await unloadAll()
+        } else if cleanupRequested {
+            await unloadInactiveIfSafe()
+            scheduleIdleEviction()
+        } else {
+            scheduleIdleEviction()
+        }
+    }
+
+    private func evictIfIdle() async {
+        idleEvictionTask = nil
+        guard activeTranscriptions == 0, activeLoads == 0 else { return }
+        await unloadAll()
+    }
+
+    private func finishLoad() async {
+        activeLoads = max(0, activeLoads - 1)
+        guard activeLoads == 0, activeTranscriptions == 0 else { return }
+
+        if memoryPressurePending {
+            await unloadAll()
+        } else if cleanupRequested {
+            await unloadInactiveIfSafe()
+            scheduleIdleEviction()
+        } else {
+            scheduleIdleEviction()
+        }
+    }
+
+    private func unloadInactiveIfSafe() async {
+        guard activeTranscriptions == 0, activeLoads == 0 else {
+            cleanupRequested = true
+            return
+        }
+        guard explicitModel == nil else {
+            cleanupRequested = false
+            return
+        }
+
+        switch language {
+        case .automatic, .english:
+            await german.unload()
+        case .german:
+            await multilingual.unload()
+        }
+        cleanupRequested = false
+    }
+
+    private func unloadAll() async {
+        guard activeTranscriptions == 0, activeLoads == 0 else {
+            memoryPressurePending = true
+            cleanupRequested = true
+            return
+        }
+        cancelIdleEviction()
+        if let explicitModel {
+            await explicitModel.unload()
+        } else {
+            await multilingual.unload()
+            await german.unload()
+        }
+        memoryPressurePending = false
+        cleanupRequested = false
+        RuntimeMemoryLog.write("all-models-released")
+    }
+
+    private func cancelIdleEviction() {
+        idleEvictionTask?.cancel()
+        idleEvictionTask = nil
     }
 
     private nonisolated static func makeTranscriber(
@@ -344,19 +540,9 @@ actor TranscriptionService {
         }
     }
 
-    private func prefetchAutomaticSpecialists() {
-        guard let englishModel = ModelRegistry.preferred(for: .english),
-              let germanModel = ModelRegistry.preferred(for: .german)
+    private func prefetchGermanSpecialist() {
+        guard let germanModel = ModelRegistry.preferred(for: .german)
         else { return }
-        Task.detached(priority: .utility) {
-            do {
-                try await WhisperKitTranscriber.downloadModel(englishModel)
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "English specialist prefetch failed: \(error)\n".utf8
-                ))
-            }
-        }
         Task.detached(priority: .utility) {
             do {
                 _ = try await GermanModelStore.shared.localURL(for: germanModel)

@@ -1,4 +1,5 @@
 import Foundation
+import WhisperKit
 
 /// Built-in transcription model registry.
 ///
@@ -14,7 +15,7 @@ enum ModelRegistry {
             whisperKitID: "openai_whisper-base.en",
             sizeMB: 145,
             languages: ["en"],
-            recommended: true
+            recommended: false
         ),
         TranscriptionModel(
             id: "whisper-large-v3-turbo",
@@ -22,6 +23,24 @@ enum ModelRegistry {
             engine: .whisperKit,
             whisperKitID: "openai_whisper-large-v3-v20240930_turbo",
             sizeMB: 1620,
+            languages: ["multi"],
+            recommended: true
+        ),
+        TranscriptionModel(
+            id: "whisper-large-v3-quantized",
+            displayName: "Whisper Large v3 (Quantized)",
+            engine: .whisperKit,
+            whisperKitID: "openai_whisper-large-v3-v20240930_626MB",
+            sizeMB: 626,
+            languages: ["multi"],
+            recommended: false
+        ),
+        TranscriptionModel(
+            id: "whisper-large-v3-turbo-quantized",
+            displayName: "Whisper Large v3 Turbo (Quantized)",
+            engine: .whisperKit,
+            whisperKitID: "openai_whisper-large-v3-v20240930_turbo_632MB",
+            sizeMB: 632,
             languages: ["multi"],
             recommended: false
         ),
@@ -71,17 +90,56 @@ enum ModelRegistry {
     }
 
     static func recommended() -> TranscriptionModel? {
-        shared.first { $0.recommended } ?? shared.first
+        preferred(for: .automatic) ?? shared.first { $0.recommended } ?? shared.first
     }
 
     static func preferred(for language: TranscriptionLanguage) -> TranscriptionModel? {
         switch language {
         case .english:
-            return find("whisper-large-v3-turbo")
+            return defaultLargeModel()
         case .automatic:
-            return find("whisper-small")
+            // Automatic mode intentionally uses the same multilingual model
+            // for detection and transcription. This avoids keeping a 488 MB
+            // detector beside the active Large model.
+            return defaultLargeModel()
         case .german:
             return find("whisper-large-v3-turbo-german-q5")
         }
     }
+
+    /// Keep full Turbo as the default quality-preserving model. On the current
+    /// M1 Pro, measured physical footprint during Core ML specialization was
+    /// lower for full Turbo than for either quantized Large candidate, even
+    /// though the quantized files are much smaller on disk. They remain
+    /// explicit candidates so newer hardware can be benchmarked independently.
+    static func defaultLargeModel() -> TranscriptionModel? {
+        find("whisper-large-v3-turbo")
+    }
+
+    /// Returns quantized Large candidates advertised by the pinned WhisperKit
+    /// hardware catalog. Explicit `--model` selection also permits testing a
+    /// catalog variant that is not in the current machine's recommended list.
+    static func quantizedLargeModels() -> [TranscriptionModel] {
+        let preferredIDs: [(whisperKitID: String, modelID: String)] = [
+            (
+                "openai_whisper-large-v3-v20240930_turbo_632MB",
+                "whisper-large-v3-turbo-quantized"
+            ),
+            (
+                "openai_whisper-large-v3-v20240930_626MB",
+                "whisper-large-v3-quantized"
+            ),
+        ]
+
+        return preferredIDs.compactMap { candidate in
+            guard supportedWhisperKitModelIDs.contains(candidate.whisperKitID) else {
+                return nil
+            }
+            return find(candidate.modelID)
+        }
+    }
+
+    private static let supportedWhisperKitModelIDs = Set(
+        WhisperKit.recommendedModels().supported
+    )
 }

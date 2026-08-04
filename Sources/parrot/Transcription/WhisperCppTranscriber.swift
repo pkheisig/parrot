@@ -8,6 +8,7 @@ actor WhisperCppTranscriber: Transcriber {
     private let model: TranscriptionModel
     private let dictionary: CorrectionDictionaryStore?
     private var context: OpaquePointer?
+    private var loadTask: Task<Void, Error>?
 
     init(model: TranscriptionModel, dictionary: CorrectionDictionaryStore? = nil) {
         self.model = model
@@ -23,7 +24,28 @@ actor WhisperCppTranscriber: Transcriber {
 
     func warmUp() async throws {
         if context != nil { return }
+        if let loadTask {
+            try await loadTask.value
+            return
+        }
+        let loadTask = Task { [self] in
+            try await loadContext()
+        }
+        self.loadTask = loadTask
+        do {
+            try await loadTask.value
+            self.loadTask = nil
+        } catch {
+            self.loadTask = nil
+            throw error
+        }
+    }
+
+    private func loadContext() async throws {
+        if context != nil { return }
         let modelURL = try await GermanModelStore.shared.localURL(for: model)
+        let memory = MemoryPeakTracker(label: "load \(model.id)")
+        defer { memory.logFinish() }
         var parameters = whisper_context_default_params()
         parameters.use_gpu = true
         parameters.flash_attn = true
@@ -41,6 +63,8 @@ actor WhisperCppTranscriber: Transcriber {
         if context == nil { try await warmUp() }
         guard let context else { throw TranscriberError.notLoaded }
 
+        let memory = MemoryPeakTracker(label: "transcribe \(model.id)")
+        defer { memory.logFinish() }
         var parameters = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         parameters.print_realtime = false
         parameters.print_progress = false
@@ -84,10 +108,15 @@ actor WhisperCppTranscriber: Transcriber {
         return WhisperKitTranscriber.sanitize(text)
     }
 
-    func unload() {
+    func isLoaded() -> Bool {
+        context != nil
+    }
+
+    func unload() async {
         if let context {
             whisper_free(context)
             self.context = nil
+            RuntimeMemoryLog.write("unloaded \(model.id)")
         }
     }
 }

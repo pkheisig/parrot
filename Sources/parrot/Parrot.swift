@@ -121,9 +121,14 @@ struct Run: ParsableCommand {
             usesExplicitModel: model != nil,
             dictionary: dictionary
         )
-        let readyModelID = settings.transcriptionLanguage == .automatic
-            ? "automatic · English/German specialists"
+        let readyModelID = model == nil && settings.transcriptionLanguage == .automatic
+            ? "automatic · one multilingual model"
             : chosenModel.id
+        let memoryPressureMonitor = RuntimeMemoryPressureMonitor {
+            Task {
+                await transcriptionService.handleMemoryPressure()
+            }
+        }
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -311,6 +316,11 @@ struct Run: ParsableCommand {
                 try monitor.start(onEvent: handleHotkey)
                 MainActor.assumeIsolated {
                     readiness.monitorStarted = true
+                    readiness.modelReady = true
+                    menuBar?.setReady(
+                        modelID: readyModelID,
+                        language: settings.transcriptionLanguage
+                    )
                 }
             } catch {
                 FileHandle.standardError.write(Data(
@@ -326,15 +336,12 @@ struct Run: ParsableCommand {
                             do {
                                 try monitor.start(onEvent: handleHotkey)
                                 readiness.monitorStarted = true
+                                readiness.modelReady = true
                                 timer.invalidate()
-                                if readiness.modelReady {
-                                    menuBar?.setReady(
-                                        modelID: readyModelID,
-                                        language: settings.transcriptionLanguage
-                                    )
-                                } else {
-                                    menuBar?.setLoading(settings.transcriptionLanguage)
-                                }
+                                menuBar?.setReady(
+                                    modelID: readyModelID,
+                                    language: settings.transcriptionLanguage
+                                )
                             } catch {
                                 // Permission propagation can lag briefly after
                                 // the Settings toggle. Keep retrying until the tap exists.
@@ -344,26 +351,10 @@ struct Run: ParsableCommand {
                 }
             }
 
-            Task {
-                do {
-                    try await transcriptionService.warmUp()
-                } catch {
-                    FileHandle.standardError.write(Data("warmup failed: \(error)\n".utf8))
-                    await MainActor.run {
-                        menuBar?.setLanguageError("model load failed · check your connection")
-                    }
-                    return
-                }
-                await MainActor.run {
-                    readiness.modelReady = true
-                    if readiness.monitorStarted {
-                        menuBar?.setReady(
-                            modelID: readyModelID,
-                            language: settings.transcriptionLanguage
-                        )
-                    }
-                }
-            }
+            // App-bundle startup is intentionally lazy: capture can begin
+            // immediately, and the first completed recording loads the model.
+            // This removes the several-hundred-MB startup residency and avoids
+            // blocking the menu bar while Core ML specializes the model.
         } else {
             let warmupSemaphore = DispatchSemaphore(value: 0)
             var warmupError: Error?
@@ -401,7 +392,9 @@ struct Run: ParsableCommand {
             "listening on \(settings.shortcut.displayName) \(settings.activationMode.rawValue) · model: \(chosenModel.id) · ^C to quit\n"
                 .utf8
         ))
-        app.run()
+        withExtendedLifetime(memoryPressureMonitor) {
+            app.run()
+        }
     }
 }
 
@@ -555,7 +548,7 @@ struct Models: ParsableCommand {
     struct List: ParsableCommand {
         func run() throws {
             for m in ModelRegistry.shared {
-                let star = m.recommended ? "★" : " "
+                let star = ModelRegistry.recommended()?.id == m.id ? "★" : " "
                 let id = m.id.padding(toLength: 26, withPad: " ", startingAt: 0)
                 let langs = "[\(m.languages.joined(separator: ","))]"
                     .padding(toLength: 9, withPad: " ", startingAt: 0)
@@ -608,6 +601,12 @@ struct TranscribeFile: ParsableCommand {
     @Option(name: .long, help: "automatic, english, or german")
     var language: String = TranscriptionLanguage.automatic.rawValue
 
+    @Option(name: .long, help: "Model id to benchmark instead of the language default.")
+    var modelID: String?
+
+    @Flag(name: .long, help: "Include per-file elapsed time in the output.")
+    var benchmark: Bool = false
+
     @Option(name: .long, help: "Temporary correction alias for verification.")
     var correctionAlias: String?
 
@@ -618,8 +617,20 @@ struct TranscribeFile: ParsableCommand {
         guard let selectedLanguage = TranscriptionLanguage(rawValue: language) else {
             throw ValidationError("language must be automatic, english, or german")
         }
-        guard let model = ModelRegistry.preferred(for: selectedLanguage) else {
-            throw ValidationError("no model is registered for \(selectedLanguage.rawValue)")
+        let model: TranscriptionModel
+        let usesExplicitModel: Bool
+        if let modelID {
+            guard let selectedModel = ModelRegistry.find(modelID) else {
+                throw ValidationError("unknown model: \(modelID)")
+            }
+            model = selectedModel
+            usesExplicitModel = true
+        } else {
+            guard let selectedModel = ModelRegistry.preferred(for: selectedLanguage) else {
+                throw ValidationError("no model is registered for \(selectedLanguage.rawValue)")
+            }
+            model = selectedModel
+            usesExplicitModel = false
         }
 
         guard (correctionAlias == nil) == (correctionCanonical == nil) else {
@@ -646,6 +657,7 @@ struct TranscribeFile: ParsableCommand {
         let service = TranscriptionService(
             model: model,
             language: selectedLanguage,
+            usesExplicitModel: usesExplicitModel,
             dictionary: dictionary
         )
         let semaphore = DispatchSemaphore(value: 0)
@@ -669,7 +681,7 @@ struct TranscribeFile: ParsableCommand {
         switch capturedResult {
         case let .success(transcripts):
             for (path, text, elapsed) in transcripts {
-                if transcripts.count > 1 {
+                if benchmark || transcripts.count > 1 {
                     print("\(path)\t\(String(format: "%.3f", elapsed))s\t\(text)")
                 } else {
                     print(text)
