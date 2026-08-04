@@ -82,12 +82,12 @@ Large artifacts remain registered for explicit per-device benchmarking. German
 remains available as an explicit 548 MB whisper.cpp specialist. This avoids
 keeping a detector, English model, and German model resident at the same time.
 
-The app loads the model lazily when the first recording is transcribed, keeps it
-hot for roughly 60 seconds after the last job, then explicitly releases the
-Core ML/Metal weights. macOS memory pressure releases them sooner. A dictation
-after eviction may take longer while the model is loaded and Core ML is primed;
-repeated dictations inside the idle window stay warm. Audio remains on the Mac;
-only model downloads use the network.
+The app loads the model lazily when the first recording is transcribed, then
+keeps the selected model hot for the rest of the app session. It explicitly
+releases an inactive language pipeline when you switch languages. macOS memory
+pressure remains the emergency unload path; a later dictation then reloads and
+re-primes the cached model. Audio remains on the Mac; only model downloads use
+the network.
 
 > **Note:** on most modern Macs the `fn` key is the bottom-left key. If you keep Fn as your shortcut and it is set to "Change input source" or "Show emoji & symbols," `parrot setup` will tell you how to flip it back to plain `fn`.
 

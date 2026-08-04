@@ -7,8 +7,9 @@
 3. **Minimal recording feedback.** A small floating pill at the bottom of the screen while recording, so the user knows the mic is hot. Click-through, borderless, hidden when idle.
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Memory-aware local inference.** Automatic detection and transcription use
-   one multilingual model; model weights load lazily, expire after idle time,
-   and release explicitly under memory pressure.
+   one multilingual model; model weights load lazily, stay resident for fast
+   repeated use, and release explicitly under memory pressure or language
+   changes.
 6. **Language-specialized models.** German remains an explicit specialist for
    users who select German directly; quantized Large variants remain selectable
    as per-device candidates.
@@ -134,10 +135,11 @@ WhisperKit warm-up includes three discarded seconds of silence after model
 loading. This forces Core ML to compile its inference graphs before a model is
 reported ready, without conditioning or retaining any priming transcript. The
 app-bundle path does this lazily on the first transcription; the foreground CLI
-still warms before entering its monitoring loop. A loaded model is evicted
-after 60 seconds of inactivity, and `WhisperKit.unloadModels()` or
-`whisper_free` is called before dropping the pipeline. Memory pressure defers
-release until an active decode completes.
+still warms before entering its monitoring loop. The selected model remains
+resident until the app exits; `WhisperKit.unloadModels()` or `whisper_free` is
+called when a pipeline becomes inactive after a language change, or when
+memory pressure requires release. Memory pressure defers release until an
+active decode completes.
 
 `RuntimeMemory.swift` samples RSS and physical footprint during model load and
 transcription. Those peaks are written to stderr so model comparisons measure

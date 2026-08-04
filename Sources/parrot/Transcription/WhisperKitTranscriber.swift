@@ -279,13 +279,8 @@ actor TranscriptionService {
     private let dictionary: CorrectionDictionaryStore
     private var activeTranscriptions = 0
     private var activeLoads = 0
-    private var idleEvictionTask: Task<Void, Never>?
     private var cleanupRequested = false
     private var memoryPressurePending = false
-
-    /// Keeping a model hot for a short idle window makes repeated dictation
-    /// responsive without retaining hundreds of megabytes indefinitely.
-    static let idleEvictionNanoseconds: UInt64 = 60 * 1_000_000_000
 
     init(
         model: TranscriptionModel,
@@ -316,7 +311,6 @@ actor TranscriptionService {
     }
 
     func warmUp() async throws {
-        cancelIdleEviction()
         activeLoads += 1
         do {
             if let explicitModel {
@@ -340,13 +334,11 @@ actor TranscriptionService {
     func setLanguage(_ language: TranscriptionLanguage) async throws -> String? {
         languageRequest += 1
         let request = languageRequest
-        cancelIdleEviction()
         if let explicitModel {
             // An explicit model selection is an intentional override. Do not
             // warm a second language model just because the menu setting
             // changes; that would defeat the single-resident-model guarantee.
             self.language = language
-            scheduleIdleEviction()
             return explicitModel.modelID
         }
         let next = transcriber(for: language)
@@ -374,7 +366,6 @@ actor TranscriptionService {
     }
 
     func transcribe(_ audio: [Float]) async throws -> String {
-        cancelIdleEviction()
         activeTranscriptions += 1
         do {
             let raw: String
@@ -425,27 +416,12 @@ actor TranscriptionService {
     /// Called by the menu-bar process when macOS reports memory pressure.
     /// During a decode we defer release until the active operation has finished.
     func handleMemoryPressure() async {
-        cancelIdleEviction()
         if activeTranscriptions > 0 || activeLoads > 0 {
             memoryPressurePending = true
             cleanupRequested = true
             return
         }
         await unloadAll()
-    }
-
-    /// Exposed for cancellation/shutdown paths and for tests that want to
-    /// exercise the lifecycle without waiting for the idle timeout.
-    func scheduleIdleEviction() {
-        cancelIdleEviction()
-        idleEvictionTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: Self.idleEvictionNanoseconds)
-            } catch {
-                return
-            }
-            await self?.evictIfIdle()
-        }
     }
 
     private func finishTranscription() async {
@@ -456,16 +432,7 @@ actor TranscriptionService {
             await unloadAll()
         } else if cleanupRequested {
             await unloadInactiveIfSafe()
-            scheduleIdleEviction()
-        } else {
-            scheduleIdleEviction()
         }
-    }
-
-    private func evictIfIdle() async {
-        idleEvictionTask = nil
-        guard activeTranscriptions == 0, activeLoads == 0 else { return }
-        await unloadAll()
     }
 
     private func finishLoad() async {
@@ -476,9 +443,6 @@ actor TranscriptionService {
             await unloadAll()
         } else if cleanupRequested {
             await unloadInactiveIfSafe()
-            scheduleIdleEviction()
-        } else {
-            scheduleIdleEviction()
         }
     }
 
@@ -507,7 +471,6 @@ actor TranscriptionService {
             cleanupRequested = true
             return
         }
-        cancelIdleEviction()
         if let explicitModel {
             await explicitModel.unload()
         } else {
@@ -517,11 +480,6 @@ actor TranscriptionService {
         memoryPressurePending = false
         cleanupRequested = false
         RuntimeMemoryLog.write("all-models-released")
-    }
-
-    private func cancelIdleEviction() {
-        idleEvictionTask?.cancel()
-        idleEvictionTask = nil
     }
 
     private nonisolated static func makeTranscriber(
