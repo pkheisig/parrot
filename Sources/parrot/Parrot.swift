@@ -316,11 +316,6 @@ struct Run: ParsableCommand {
                 try monitor.start(onEvent: handleHotkey)
                 MainActor.assumeIsolated {
                     readiness.monitorStarted = true
-                    readiness.modelReady = true
-                    menuBar?.setReady(
-                        modelID: readyModelID,
-                        language: settings.transcriptionLanguage
-                    )
                 }
             } catch {
                 FileHandle.standardError.write(Data(
@@ -336,12 +331,15 @@ struct Run: ParsableCommand {
                             do {
                                 try monitor.start(onEvent: handleHotkey)
                                 readiness.monitorStarted = true
-                                readiness.modelReady = true
                                 timer.invalidate()
-                                menuBar?.setReady(
-                                    modelID: readyModelID,
-                                    language: settings.transcriptionLanguage
-                                )
+                                if readiness.modelReady {
+                                    menuBar?.setReady(
+                                        modelID: readyModelID,
+                                        language: settings.transcriptionLanguage
+                                    )
+                                } else {
+                                    menuBar?.setLoading(settings.transcriptionLanguage)
+                                }
                             } catch {
                                 // Permission propagation can lag briefly after
                                 // the Settings toggle. Keep retrying until the tap exists.
@@ -351,10 +349,31 @@ struct Run: ParsableCommand {
                 }
             }
 
-            // App-bundle startup is intentionally lazy: capture can begin
-            // immediately, and the first completed recording loads the model.
-            // This removes the several-hundred-MB startup residency and avoids
-            // blocking the menu bar while Core ML specializes the model.
+            // Load and prime the selected model in the background while the
+            // menu-bar app remains responsive. The hotkey is guarded by
+            // `readiness.modelReady`, so the first recording never pays the
+            // Core ML download/compilation cost and the model stays hot after
+            // this task completes.
+            Task {
+                do {
+                    try await transcriptionService.warmUp()
+                } catch {
+                    FileHandle.standardError.write(Data("warmup failed: \(error)\n".utf8))
+                    await MainActor.run {
+                        menuBar?.setLanguageError("model load failed · check your connection")
+                    }
+                    return
+                }
+                await MainActor.run {
+                    readiness.modelReady = true
+                    if readiness.monitorStarted {
+                        menuBar?.setReady(
+                            modelID: readyModelID,
+                            language: settings.transcriptionLanguage
+                        )
+                    }
+                }
+            }
         } else {
             let warmupSemaphore = DispatchSemaphore(value: 0)
             var warmupError: Error?

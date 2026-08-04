@@ -7,9 +7,9 @@
 3. **Minimal recording feedback.** A small floating pill at the bottom of the screen while recording, so the user knows the mic is hot. Click-through, borderless, hidden when idle.
 4. **On-device.** No network calls for transcription. Audio never leaves the machine.
 5. **Memory-aware local inference.** Automatic detection and transcription use
-   one multilingual model; model weights load lazily, stay resident for fast
-   repeated use, and release explicitly under memory pressure or language
-   changes.
+   one multilingual model; model weights warm in the background at app startup,
+   stay resident for fast repeated use, and release explicitly under memory
+   pressure or language changes.
 6. **Language-specialized models.** German remains an explicit specialist for
    users who select German directly; quantized Large variants remain selectable
    as per-device candidates.
